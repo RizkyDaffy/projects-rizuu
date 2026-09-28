@@ -1,0 +1,28 @@
+{
+  "name": "rizuu-backend",
+  "version": "1.0.0",
+  "description": "Rizuu-Router API Gateway backend (Bun + Elysia)",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "bun --hot src/index.ts",
+    "start": "bun src/index.ts",
+    "build:ui": "bun build src/ui/index.tsx --outfile public/app.js --minify",
+    "build": "bun run build:ui && bun build src/index.ts --outdir dist --target bun",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@elysiajs/cors": "latest",
+    "@elysiajs/static": "^1.4.10",
+    "@elysiajs/swagger": "latest",
+    "@floating-ui/react": "^0.27.20",
+    "elysia": "latest",
+    "lucide-react": "^1.48.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "bun-types": "latest"
+  }
+}

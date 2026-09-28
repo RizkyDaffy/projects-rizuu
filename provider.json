@@ -1,0 +1,28 @@
+[
+  {
+    "provider": "openai",
+    "label": "OpenAI",
+    "endpoint": "https://api.openai.com"
+  },
+  {
+    "provider": "anthropic",
+    "label": "Anthropic",
+    "endpoint": "https://api.anthropic.com",
+    "auth": "anthropic"
+  },
+  {
+    "provider": "bandelbanget",
+    "label": "BandelBanget AI",
+    "endpoint": "https://bandelbanget.xys"
+  },
+  {
+    "provider": "ryuzumi",
+    "label": "Ryuzumi AI",
+    "endpoint": "https://router.ryzumi.net/v1"
+  },
+  {
+    "provider": "agentrouter",
+    "label": "AgentRouter AI",
+    "endpoint": "https://agentrouter.org/"
+  }
+]
