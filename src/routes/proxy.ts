@@ -1,6 +1,6 @@
 import { Elysia } from "elysia";
 import { getDb } from "../lib/db";
-import { newId, ok } from "../lib/utils";
+import { newId } from "../lib/utils";
 import { endpointFor, authStyleFor } from "../lib/providers";
 import os from "os";
 
@@ -88,6 +88,69 @@ function selectUpstream(upstreams: Upstream[]): Upstream | null {
     if (r <= 0) return u;
   }
   return upstreams[0];
+}
+
+// Weighted-random permutation — failover order respects weight
+function weightedOrder(list: Upstream[]): Upstream[] {
+  const pool = [...list];
+  const order: Upstream[] = [];
+  while (pool.length) {
+    const pick = selectUpstream(pool)!;
+    order.push(pick);
+    pool.splice(pool.indexOf(pick), 1);
+  }
+  return order;
+}
+
+type ParsedUpModel = { id: string; name?: string; enabled: boolean };
+
+function parseUpModels(u: Upstream): ParsedUpModel[] {
+  try {
+    const list = JSON.parse(u.models);
+    return Array.isArray(list) ? list : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+/** Does upstream serve requested model? Handles `prefix/model` alias → raw id rewrite. */
+function matchUpstreamModel(u: Upstream, model: string): { has: boolean; forwardAs: string } {
+  for (const m of parseUpModels(u)) {
+    if (!m.enabled) continue;
+    if (u.prefix && `${u.prefix}/${m.id}` === model) return { has: true, forwardAs: m.id };
+    if (m.id === model) return { has: true, forwardAs: model };
+  }
+  return { has: false, forwardAs: model };
+}
+
+type Candidate = { upstream: Upstream; forwardModel: string };
+
+/**
+ * Model-aware candidate ranking (NekoRouter-style):
+ * upstreams declaring the requested model first (weighted order),
+ * else all active upstreams (model list never synced → old behavior).
+ */
+function rankCandidates(upstreams: Upstream[], requestedModel: string | null): Candidate[] {
+  if (requestedModel) {
+    const matched = upstreams.filter((u) => matchUpstreamModel(u, requestedModel).has);
+    if (matched.length) {
+      return weightedOrder(matched).map((u) => ({
+        upstream: u,
+        forwardModel: matchUpstreamModel(u, requestedModel).forwardAs,
+      }));
+    }
+  }
+  return weightedOrder(upstreams).map((u) => ({ upstream: u, forwardModel: requestedModel ?? "" }));
+}
+
+// Failover: retry next candidate on network error or transient upstream status
+const FAILOVER_STATUS = new Set([408, 429, 500, 502, 503, 504]);
+
+function discardBody(r: Response | null) {
+  if (!r) return;
+  try {
+    r.body?.cancel();
+  } catch (_) { }
 }
 
 // Round-robin cursor per upstream
@@ -213,28 +276,97 @@ function getClientKey(
 
 const START_TIME = Date.now();
 
+function fmtUptime(totalSeconds: number): string {
+  const d = Math.floor(totalSeconds / 86400);
+  const h = Math.floor((totalSeconds % 86400) / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  const s = totalSeconds % 60;
+  return `${d}d ${h}h ${m}m ${s}s`;
+}
+const fmtMB = (b: number) => `${(b / 1048576).toFixed(2)} MB`;
+const fmtGB = (b: number) => `${(b / 1073741824).toFixed(2)} GB`;
+
+/** Gateway diagnostics — 1:1 NekoRouter /v1 shape (flat, no ok() wrapper) */
+function gatewayInfo() {
+  const cpus = os.cpus();
+  const mem = process.memoryUsage();
+  const uptimeSeconds = Math.floor((Date.now() - START_TIME) / 1000);
+  return {
+    status: "online",
+    gateway: "Rizuu-Router",
+    version: "1.0.0",
+    motivation: {
+      quote: "Tetap tenang, berpikir jernih, dan selesaikan tantangan baris demi baris.",
+      author: "Rizuu-Router",
+    },
+    server: {
+      runtime: `Bun v${Bun.version}`,
+      platform: `${os.platform()} (${os.arch()})`,
+      os: `${os.type()} ${os.release()}`,
+      cpus: { model: cpus[0]?.model ?? "unknown", cores: cpus.length },
+      memory: {
+        rss: fmtMB(mem.rss),
+        heap_used: fmtMB(mem.heapUsed),
+        heap_total: fmtMB(mem.heapTotal),
+        system_total_ram: fmtGB(os.totalmem()),
+        system_free_ram: fmtGB(os.freemem()),
+      },
+      uptime: fmtUptime(uptimeSeconds),
+      uptime_seconds: uptimeSeconds,
+      timestamp: new Date().toISOString(),
+    },
+    endpoints: [
+      {
+        method: "POST",
+        path: "/v1/chat/completions",
+        auth: "Bearer <client_key> or x-api-key: <client_key>",
+        description:
+          "OpenAI-compatible Chat Completions API with streaming, prompt caching, failover routing, and token telemetry.",
+      },
+      {
+        method: "POST",
+        path: "/v1/messages",
+        auth: "x-api-key: <client_key> or Bearer <client_key>",
+        description: "Anthropic-compatible Messages API with full streaming and thinking protocol support.",
+      },
+      {
+        method: "GET",
+        path: "/v1/models",
+        auth: "Public / Optional Client Key",
+        description: "List all active AI models across connected upstream providers in OpenAI format.",
+      },
+      {
+        method: "GET",
+        path: "/models",
+        auth: "Public / Optional Client Key",
+        description: "Standard OpenAI alias for /v1/models.",
+      },
+      {
+        method: "GET",
+        path: "/health",
+        auth: "Public",
+        description: "Healthcheck probe returning gateway status and timestamp.",
+      },
+      {
+        method: "GET",
+        path: "/swagger",
+        auth: "Public",
+        description: "Interactive OpenAPI / Swagger UI test console and API documentation.",
+      },
+      {
+        method: "GET",
+        path: "/v1",
+        auth: "Public",
+        description: "Gateway system diagnostics, hardware specifications, uptime, and endpoint directory.",
+      },
+    ],
+  };
+}
+
 export const proxyRoutes = new Elysia()
   // ──── Gateway info ────────────────────────────────────────────────────────
-  .get("/v1", () => {
-    const cpus = os.cpus();
-    return ok({
-      name: "Rizuu-Router API Gateway",
-      version: "1.0.0",
-      uptime: Math.floor((Date.now() - START_TIME) / 1000),
-      hardware: { cpus: cpus.length, model: cpus[0]?.model, platform: os.platform(), arch: os.arch() },
-      endpoints: ["/v1/chat/completions", "/v1/models", "/v1/messages", "/models"],
-    });
-  })
-  .get("/v1/", () => {
-    const cpus = os.cpus();
-    return ok({
-      name: "Rizuu-Router API Gateway",
-      version: "1.0.0",
-      uptime: Math.floor((Date.now() - START_TIME) / 1000),
-      hardware: { cpus: cpus.length, model: cpus[0]?.model, platform: os.platform(), arch: os.arch() },
-      endpoints: ["/v1/chat/completions", "/v1/models", "/v1/messages", "/models"],
-    });
-  })
+  .get("/v1", () => gatewayInfo())
+  .get("/v1/", () => gatewayInfo())
 
   // ──── Model list (public) ──────────────────────────────────────────────
   .get("/v1/models", () => {
@@ -262,7 +394,7 @@ export const proxyRoutes = new Elysia()
       if (blocked) return blocked;
     }
 
-    // Select upstream
+    // Select upstream pool (client key allowlist = upstream ids)
     let upstreams = db.prepare("SELECT * FROM upstreams WHERE is_active = 1").all() as Upstream[];
     if (clientKey) {
       const allowed: string[] = JSON.parse(clientKey.allowed_providers ?? "[]");
@@ -273,29 +405,63 @@ export const proxyRoutes = new Elysia()
       return { error: { message: "No active upstreams available.", type: "no_upstream" } };
     }
 
-    const upstream = selectUpstream(upstreams)!;
-    const upKey = getUpstreamKey(upstream.id, !!upstream.round_robin, db);
-    if (!upKey) {
-      set.status = 503;
-      return { error: { message: "No active upstream API key configured.", type: "no_key" } };
-    }
-
-    // Sniff model from body for telemetry
+    // Sniff model from body for routing + telemetry
     let requestedModel: string | null = null;
     let bodyText: string | null = null;
+    let bodyObj: any = null;
     try {
       bodyText = await request.text();
-      requestedModel = JSON.parse(bodyText).model ?? null;
+      bodyObj = JSON.parse(bodyText);
+      requestedModel = bodyObj?.model ?? null;
     } catch (_) { }
 
-    // Rebuild request with body text (body already consumed above)
-    const patchedReq = new Request(request.url, {
-      method: request.method,
-      headers: request.headers,
-      body: bodyText,
-    });
+    // Model-aware candidates + failover (NekoRouter-style)
+    const candidates = rankCandidates(upstreams, requestedModel);
+    let res: Response | null = null;
+    let usedUpstream: Upstream | null = null;
+    let lastResp: Response | null = null;
 
-    const res = await proxyRequest(patchedReq, upstream.provider, upstream, upKey.key);
+    for (let i = 0; i < candidates.length; i++) {
+      const cand = candidates[i];
+      const upKey = getUpstreamKey(cand.upstream.id, !!cand.upstream.round_robin, db);
+      if (!upKey) continue;
+
+      let sendBody = bodyText;
+      if (bodyObj && requestedModel && cand.forwardModel && cand.forwardModel !== requestedModel) {
+        bodyObj.model = cand.forwardModel;
+        sendBody = JSON.stringify(bodyObj);
+      }
+
+      const patchedReq = new Request(request.url, {
+        method: request.method,
+        headers: request.headers,
+        body: sendBody,
+      });
+
+      try {
+        const r = await proxyRequest(patchedReq, cand.upstream.provider, cand.upstream, upKey.key);
+        const isLast = i === candidates.length - 1;
+        if (FAILOVER_STATUS.has(r.status) && !isLast) {
+          discardBody(lastResp);
+          lastResp = r;
+          continue;
+        }
+        res = r;
+        usedUpstream = cand.upstream;
+        discardBody(lastResp);
+        lastResp = null;
+        break;
+      } catch (_) {
+        continue;
+      }
+    }
+
+    if (!res) {
+      if (lastResp) return lastResp;
+      set.status = 502;
+      return { error: { message: "All upstream attempts failed.", type: "upstream_unreachable" } };
+    }
+
     const latency = Date.now() - start;
 
     // Record telemetry + deduct quota (streaming: tokens = 0, recorded on next req; non-stream: extracted)
@@ -304,7 +470,7 @@ export const proxyRoutes = new Elysia()
       const tokens = isStream
         ? { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
         : await extractTokens(res, "openai");
-      recordUsage(db, clientKey, upstream, requestedModel, tokens, latency, res.status);
+      recordUsage(db, clientKey, usedUpstream!, requestedModel, tokens, latency, res.status);
     } catch (_) { }
 
     return res;
@@ -339,27 +505,62 @@ export const proxyRoutes = new Elysia()
       return { error: { message: "No active Anthropic upstreams.", type: "no_upstream" } };
     }
 
-    const upstream = selectUpstream(upstreams)!;
-    const upKey = getUpstreamKey(upstream.id, !!upstream.round_robin, db);
-    if (!upKey) {
-      set.status = 503;
-      return { error: { message: "No active upstream API key configured.", type: "no_key" } };
-    }
-
     let requestedModel: string | null = null;
     let bodyText: string | null = null;
+    let bodyObj: any = null;
     try {
       bodyText = await request.text();
-      requestedModel = JSON.parse(bodyText).model ?? null;
+      bodyObj = JSON.parse(bodyText);
+      requestedModel = bodyObj?.model ?? null;
     } catch (_) { }
 
-    const patchedReq = new Request(request.url, {
-      method: request.method,
-      headers: request.headers,
-      body: bodyText,
-    });
+    // Model-aware candidates + failover (NekoRouter-style)
+    const candidates = rankCandidates(upstreams, requestedModel);
+    let res: Response | null = null;
+    let usedUpstream: Upstream | null = null;
+    let lastResp: Response | null = null;
 
-    const res = await proxyRequest(patchedReq, "anthropic", upstream, upKey.key);
+    for (let i = 0; i < candidates.length; i++) {
+      const cand = candidates[i];
+      const upKey = getUpstreamKey(cand.upstream.id, !!cand.upstream.round_robin, db);
+      if (!upKey) continue;
+
+      let sendBody = bodyText;
+      if (bodyObj && requestedModel && cand.forwardModel && cand.forwardModel !== requestedModel) {
+        bodyObj.model = cand.forwardModel;
+        sendBody = JSON.stringify(bodyObj);
+      }
+
+      const patchedReq = new Request(request.url, {
+        method: request.method,
+        headers: request.headers,
+        body: sendBody,
+      });
+
+      try {
+        const r = await proxyRequest(patchedReq, "anthropic", cand.upstream, upKey.key);
+        const isLast = i === candidates.length - 1;
+        if (FAILOVER_STATUS.has(r.status) && !isLast) {
+          discardBody(lastResp);
+          lastResp = r;
+          continue;
+        }
+        res = r;
+        usedUpstream = cand.upstream;
+        discardBody(lastResp);
+        lastResp = null;
+        break;
+      } catch (_) {
+        continue;
+      }
+    }
+
+    if (!res) {
+      if (lastResp) return lastResp;
+      set.status = 502;
+      return { error: { message: "All upstream attempts failed.", type: "upstream_unreachable" } };
+    }
+
     const latency = Date.now() - start;
 
     try {
@@ -367,7 +568,7 @@ export const proxyRoutes = new Elysia()
       const tokens = isStream
         ? { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
         : await extractTokens(res, "anthropic");
-      recordUsage(db, clientKey, upstream, requestedModel, tokens, latency, res.status);
+      recordUsage(db, clientKey, usedUpstream!, requestedModel, tokens, latency, res.status);
     } catch (_) { }
 
     return res;
@@ -376,16 +577,67 @@ export const proxyRoutes = new Elysia()
 // ── helpers ────────────────────────────────────────────────────────────────
 function buildModelList(db: ReturnType<typeof getDb>) {
   const upstreams = db.prepare("SELECT * FROM upstreams WHERE is_active = 1").all() as Upstream[];
+  const created = Math.floor(Date.now() / 1000);
   const models: any[] = [];
   for (const u of upstreams) {
-    for (const m of JSON.parse(u.models)) {
+    for (const m of parseUpModels(u)) {
       if (m.enabled) {
         const id = u.prefix ? `${u.prefix}/${m.id}` : m.id;
         if (!models.find((x) => x.id === id)) {
-          models.push({ id, object: "model", created: Math.floor(Date.now() / 1000), owned_by: u.provider });
+          models.push(enrichModel(id, m, u, created));
         }
       }
     }
   }
   return { object: "list", data: models };
+}
+
+/** NekoRouter-style enriched model object (capabilities/permission metadata) */
+function enrichModel(id: string, m: ParsedUpModel, u: Upstream, created: number) {
+  return {
+    id,
+    object: "model",
+    created,
+    owned_by: u.provider,
+    name: m.name || id,
+    description: `${m.name || id} routed via Rizuu-Router`,
+    provider: u.provider,
+    type: "chat",
+    context_window: 128000,
+    max_tokens: 8192,
+    max_output_tokens: 8192,
+    capabilities: {
+      completion: true,
+      chat_completion: true,
+      embeddings: false,
+      vision: false,
+      function_calling: true,
+      tools: true,
+      tool_choice: true,
+      json_mode: true,
+      json_schema: true,
+      streaming: true,
+      reasoning: false,
+      image_generation: false,
+    },
+    permission: [
+      {
+        id: `modelperm-${id.replace(/[^a-z0-9]/gi, "").toLowerCase()}`,
+        object: "model_permission",
+        created,
+        allow_create_engine: false,
+        allow_sampling: true,
+        allow_logprobs: false,
+        allow_search_indices: false,
+        allow_view: true,
+        allow_fine_tuning: false,
+        organization: "*",
+        group: null,
+        is_blocking: false,
+      },
+    ],
+    root: id,
+    parent: null,
+    enabled: true,
+  };
 }
