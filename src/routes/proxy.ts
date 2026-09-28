@@ -143,14 +143,74 @@ function rankCandidates(upstreams: Upstream[], requestedModel: string | null): C
   return weightedOrder(upstreams).map((u) => ({ upstream: u, forwardModel: requestedModel ?? "" }));
 }
 
-// Failover: retry next candidate on network error or transient upstream status
-const FAILOVER_STATUS = new Set([408, 429, 500, 502, 503, 504]);
+// ── Upstream error shielding (commercial branding) ─────────────────────────
+// Raw upstream/provider errors NEVER reach clients: bodies, provider names,
+// billing URLs, request ids are all replaced by one generic Rizuu message.
+function genericUpstreamError(): Response {
+  return new Response(
+    JSON.stringify({
+      error: {
+        message: "can't connect to router, we're lookin for it, try again later!",
+        type: "server_error",
+        code: "router_unavailable",
+      },
+    }),
+    { status: 503, headers: { "Content-Type": "application/json" } }
+  );
+}
 
-function discardBody(r: Response | null) {
-  if (!r) return;
-  try {
-    r.body?.cancel();
-  } catch (_) { }
+type Screened = { ok: boolean; res: Response | null };
+
+/**
+ * Body-level error screening: relays return quota/credit errors with HTTP 200
+ * (plain text, error JSON without `error` key, or SSE `data: {...}` frames).
+ * A chat completion is ONLY valid if it carries `choices` — anything else
+ * (quota text, error payloads, garbage) is shielded, never forwarded.
+ */
+async function screenUpstreamResponse(r: Response): Promise<Screened> {
+  if (!r.ok) return { ok: false, res: null };
+
+  const ct = r.headers.get("content-type") ?? "";
+
+  // ── SSE stream: peek first chunk, pass only real completion frames ──
+  if (ct.includes("text/event-stream")) {
+    if (!r.body) return { ok: false, res: null };
+    const reader = r.body.getReader();
+    const first = await reader.read().catch(() => ({ done: true, value: undefined as Uint8Array | undefined }));
+    if (first.done || !first.value) {
+      try { reader.cancel(); } catch (_) { }
+      return { ok: false, res: null };
+    }
+    const head = new TextDecoder().decode(first.value);
+    if (!head.includes('"choices"')) {
+      try { reader.cancel(); } catch (_) { }
+      return { ok: false, res: null };
+    }
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        controller.enqueue(first.value!);
+        try {
+          for (;;) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            controller.enqueue(value);
+          }
+        } catch (_) { }
+        try { controller.close(); } catch (_) { }
+      },
+    });
+    const headers = new Headers(r.headers);
+    headers.delete("content-length");
+    return { ok: true, res: new Response(stream, { status: r.status, headers }) };
+  }
+
+  // ── Buffered body: must contain a chat completion (`choices`) ──
+  const text = await r.text().catch(() => "");
+  if (!text.includes('"choices"')) return { ok: false, res: null };
+  const headers = new Headers(r.headers);
+  headers.delete("content-length");
+  headers.delete("content-encoding");
+  return { ok: true, res: new Response(text, { status: r.status, headers }) };
 }
 
 // Round-robin cursor per upstream
@@ -182,13 +242,7 @@ async function proxyRequest(
 ): Promise<Response> {
   const baseUrl = upstream.base_url ?? endpointFor(provider);
   if (!baseUrl) {
-    return new Response(
-      JSON.stringify({
-        success: false,
-        error: `No endpoint configured for provider "${provider}". Add it to provider.json`,
-      }),
-      { status: 502, headers: { "content-type": "application/json" } }
-    );
+    return genericUpstreamError();
   }
   const url = new URL(req.url);
   const targetUrl = `${baseUrl}${url.pathname}${url.search}`;
@@ -379,7 +433,7 @@ export const proxyRoutes = new Elysia()
   })
 
   // ──── POST /v1/chat/completions — OpenAI-compatible proxy ─────────────
-  .post("/v1/chat/completions", async ({ request, set }) => {
+  .post("/v1/chat/completions", async ({ request }) => {
     const db = getDb();
     const start = Date.now();
 
@@ -401,8 +455,7 @@ export const proxyRoutes = new Elysia()
       if (allowed.length) upstreams = upstreams.filter((u) => allowed.includes(u.id));
     }
     if (!upstreams.length) {
-      set.status = 503;
-      return { error: { message: "No active upstreams available.", type: "no_upstream" } };
+      return genericUpstreamError();
     }
 
     // Sniff model from body for routing + telemetry
@@ -415,16 +468,17 @@ export const proxyRoutes = new Elysia()
       requestedModel = bodyObj?.model ?? null;
     } catch (_) { }
 
-    // Model-aware candidates + failover (NekoRouter-style)
+    // Model-aware candidates + failover; upstream errors never leak (generic shield)
     const candidates = rankCandidates(upstreams, requestedModel);
     let res: Response | null = null;
     let usedUpstream: Upstream | null = null;
-    let lastResp: Response | null = null;
+    let attemptedUpstream: Upstream | null = null;
 
     for (let i = 0; i < candidates.length; i++) {
       const cand = candidates[i];
       const upKey = getUpstreamKey(cand.upstream.id, !!cand.upstream.round_robin, db);
       if (!upKey) continue;
+      attemptedUpstream = cand.upstream;
 
       let sendBody = bodyText;
       if (bodyObj && requestedModel && cand.forwardModel && cand.forwardModel !== requestedModel) {
@@ -440,29 +494,30 @@ export const proxyRoutes = new Elysia()
 
       try {
         const r = await proxyRequest(patchedReq, cand.upstream.provider, cand.upstream, upKey.key);
-        const isLast = i === candidates.length - 1;
-        if (FAILOVER_STATUS.has(r.status) && !isLast) {
-          discardBody(lastResp);
-          lastResp = r;
-          continue;
+        const screened = await screenUpstreamResponse(r);
+        if (screened.ok && screened.res) {
+          res = screened.res;
+          usedUpstream = cand.upstream;
+          break;
         }
-        res = r;
-        usedUpstream = cand.upstream;
-        discardBody(lastResp);
-        lastResp = null;
-        break;
-      } catch (_) {
-        continue;
-      }
-    }
-
-    if (!res) {
-      if (lastResp) return lastResp;
-      set.status = 502;
-      return { error: { message: "All upstream attempts failed.", type: "upstream_unreachable" } };
+        // Upstream error: non-2xx, or 200 carrying error JSON/SSE (quota,
+        // no credits, billing...) — raw body discarded, next candidate tried.
+        try {
+          await Promise.resolve(r.body?.cancel()).catch(() => {});
+        } catch (_) { }
+      } catch (_) { }
     }
 
     const latency = Date.now() - start;
+
+    if (!res) {
+      if (attemptedUpstream) {
+        try {
+          recordUsage(db, clientKey, attemptedUpstream, requestedModel, { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }, latency, 503);
+        } catch (_) { }
+      }
+      return genericUpstreamError();
+    }
 
     // Record telemetry + deduct quota (streaming: tokens = 0, recorded on next req; non-stream: extracted)
     try {
@@ -477,7 +532,7 @@ export const proxyRoutes = new Elysia()
   })
 
   // ──── POST /v1/messages — Anthropic-compatible proxy ──────────────────
-  .post("/v1/messages", async ({ request, set }) => {
+  .post("/v1/messages", async ({ request }) => {
     const db = getDb();
     const start = Date.now();
 
@@ -501,8 +556,7 @@ export const proxyRoutes = new Elysia()
       if (allowed.length) upstreams = upstreams.filter((u) => allowed.includes(u.id));
     }
     if (!upstreams.length) {
-      set.status = 503;
-      return { error: { message: "No active Anthropic upstreams.", type: "no_upstream" } };
+      return genericUpstreamError();
     }
 
     let requestedModel: string | null = null;
@@ -514,16 +568,17 @@ export const proxyRoutes = new Elysia()
       requestedModel = bodyObj?.model ?? null;
     } catch (_) { }
 
-    // Model-aware candidates + failover (NekoRouter-style)
+    // Model-aware candidates + failover; upstream errors never leak (generic shield)
     const candidates = rankCandidates(upstreams, requestedModel);
     let res: Response | null = null;
     let usedUpstream: Upstream | null = null;
-    let lastResp: Response | null = null;
+    let attemptedUpstream: Upstream | null = null;
 
     for (let i = 0; i < candidates.length; i++) {
       const cand = candidates[i];
       const upKey = getUpstreamKey(cand.upstream.id, !!cand.upstream.round_robin, db);
       if (!upKey) continue;
+      attemptedUpstream = cand.upstream;
 
       let sendBody = bodyText;
       if (bodyObj && requestedModel && cand.forwardModel && cand.forwardModel !== requestedModel) {
@@ -539,29 +594,30 @@ export const proxyRoutes = new Elysia()
 
       try {
         const r = await proxyRequest(patchedReq, "anthropic", cand.upstream, upKey.key);
-        const isLast = i === candidates.length - 1;
-        if (FAILOVER_STATUS.has(r.status) && !isLast) {
-          discardBody(lastResp);
-          lastResp = r;
-          continue;
+        const screened = await screenUpstreamResponse(r);
+        if (screened.ok && screened.res) {
+          res = screened.res;
+          usedUpstream = cand.upstream;
+          break;
         }
-        res = r;
-        usedUpstream = cand.upstream;
-        discardBody(lastResp);
-        lastResp = null;
-        break;
-      } catch (_) {
-        continue;
-      }
-    }
-
-    if (!res) {
-      if (lastResp) return lastResp;
-      set.status = 502;
-      return { error: { message: "All upstream attempts failed.", type: "upstream_unreachable" } };
+        // Upstream error: non-2xx, or 200 carrying error JSON/SSE (quota,
+        // billing, request ids) — raw body discarded, next candidate tried.
+        try {
+          await Promise.resolve(r.body?.cancel()).catch(() => {});
+        } catch (_) { }
+      } catch (_) { }
     }
 
     const latency = Date.now() - start;
+
+    if (!res) {
+      if (attemptedUpstream) {
+        try {
+          recordUsage(db, clientKey, attemptedUpstream, requestedModel, { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }, latency, 503);
+        } catch (_) { }
+      }
+      return genericUpstreamError();
+    }
 
     try {
       const isStream = res.headers.get("content-type")?.includes("text/event-stream");
@@ -592,16 +648,16 @@ function buildModelList(db: ReturnType<typeof getDb>) {
   return { object: "list", data: models };
 }
 
-/** NekoRouter-style enriched model object (capabilities/permission metadata) */
+/** NekoRouter-style enriched model object — provider identity hidden (Rizuu-branded) */
 function enrichModel(id: string, m: ParsedUpModel, u: Upstream, created: number) {
   return {
     id,
     object: "model",
     created,
-    owned_by: u.provider,
+    owned_by: "Rizuu-Router",
     name: m.name || id,
     description: `${m.name || id} routed via Rizuu-Router`,
-    provider: u.provider,
+    provider: "Rizuu-Router",
     type: "chat",
     context_window: 128000,
     max_tokens: 8192,
@@ -641,3 +697,4 @@ function enrichModel(id: string, m: ParsedUpModel, u: Upstream, created: number)
     enabled: true,
   };
 }
+
