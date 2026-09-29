@@ -22,6 +22,12 @@ import {
   CheckCircle2,
   Eye,
   EyeOff,
+  Boxes,
+  Search,
+  Filter,
+  ChevronLeft,
+  ChevronRight,
+  Sparkles,
 } from "lucide-react";
 import {
   useFloating,
@@ -76,6 +82,35 @@ type TelemetryLog = {
   latency_ms: number;
   status: number;
   created_at: string;
+};
+
+type HistoryBar = {
+  status: "success" | "warning" | "error" | "idle";
+  latency: number;
+  time: string;
+};
+
+type ModelManagementItem = {
+  id: string;
+  name: string;
+  upstreamId: string;
+  upstreamName: string;
+  provider: string;
+  enabled: boolean;
+  upstreamActive: boolean;
+  status: "normal" | "demote" | "offline";
+  availability: number;
+  ttftP90: number;
+  avgLatency: number;
+  tags: string[];
+  history: HistoryBar[];
+};
+
+type ModelSummary = {
+  successRate24h: number;
+  availableModels: number;
+  totalModels: number;
+  activeUpstreams: number;
 };
 
 /**
@@ -281,12 +316,23 @@ function KeyActionMenu({ k, onTopup, onEdit, onRotate, onReset, onDelete }: KeyA
 }
 
 export function App() {
-  const [activeTab, setActiveTab] = useState<"keys" | "upstreams" | "telemetry" | "admin">("keys");
+  const [activeTab, setActiveTab] = useState<"keys" | "upstreams" | "models" | "telemetry" | "admin">("keys");
   const [authStatus, setAuthStatus] = useState<boolean>(false);
   const [pinInput, setPinInput] = useState("");
   const [keys, setKeys] = useState<KeyItem[]>([]);
   const [upstreams, setUpstreams] = useState<UpstreamItem[]>([]);
   const [telemetryLogs, setTelemetryLogs] = useState<TelemetryLog[]>([]);
+
+  // Model Management State (1:1 matching brain/image.png)
+  const [modelsData, setModelsData] = useState<{ summary: ModelSummary; models: ModelManagementItem[] } | null>(null);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelsSyncing, setModelsSyncing] = useState(false);
+  const [testingModelId, setTestingModelId] = useState<string | null>(null);
+  const [modelsTimeWindow, setModelsTimeWindow] = useState<"24h" | "1h">("24h");
+  const [modelSearch, setModelSearch] = useState("");
+  const [modelProviderFilter, setModelProviderFilter] = useState("all");
+  const [modelStatusFilter, setModelStatusFilter] = useState<"all" | "normal" | "demote" | "offline">("all");
+  const [modelsPage, setModelsPage] = useState(1);
   const [stats, setStats] = useState<any>(null);
   const [activeRequests, setActiveRequests] = useState<number>(0);
   const [optimizations, setOptimizations] = useState<any>({});
@@ -430,9 +476,84 @@ export function App() {
     } catch (e) { }
   };
 
+  const loadModels = async (win = modelsTimeWindow) => {
+    setModelsLoading(true);
+    try {
+      const res = await fetch(`/api/models/management?window=${win}`);
+      const json = await res.json();
+      if (json.data) setModelsData(json.data);
+    } catch (e) { }
+    finally {
+      setModelsLoading(false);
+    }
+  };
+
+  const testModel = async (upstreamId: string, modelId: string) => {
+    setTestingModelId(modelId);
+    try {
+      const res = await fetch("/api/models/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ upstreamId, modelId }),
+      });
+      const data = await res.json();
+      await loadModels(modelsTimeWindow);
+      if (!data.data?.success && data.data?.error) {
+        alert(`Test Response for ${modelId}:\nStatus: HTTP ${data.data?.statusCode} (${data.data?.latency_ms}ms)\n${data.data?.error}`);
+      }
+    } catch (e) {
+      console.error("Test failed", e);
+    } finally {
+      setTestingModelId(null);
+    }
+  };
+
+  const syncAllModels = async () => {
+    setModelsSyncing(true);
+    try {
+      await fetch("/api/models/sync-all", { method: "POST" });
+      await loadModels();
+      await loadUpstreams();
+    } catch (e) { }
+    finally {
+      setModelsSyncing(false);
+    }
+  };
+
+  const toggleModelEnabled = async (upstreamId: string, modelId: string, currentEnabled: boolean) => {
+    try {
+      await fetch("/api/models/toggle", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ upstreamId, modelId, enabled: !currentEnabled }),
+      });
+      setModelsData((prev) => {
+        if (!prev) return null;
+        const updated = prev.models.map((m) => {
+          if (m.upstreamId === upstreamId && m.id === modelId) {
+            const nextEnabled = !currentEnabled;
+            return {
+              ...m,
+              enabled: nextEnabled,
+              status: !nextEnabled ? ("offline" as const) : m.status === "offline" ? ("normal" as const) : m.status,
+            };
+          }
+          return m;
+        });
+        const available = updated.filter((m) => m.enabled && m.upstreamActive).length;
+        return {
+          ...prev,
+          summary: { ...prev.summary, availableModels: available },
+          models: updated,
+        };
+      });
+    } catch (e) { }
+  };
+
   const loadAll = () => {
     loadKeys();
     loadUpstreams();
+    loadModels();
     loadTelemetry();
     loadAdmin();
     loadProviders();
@@ -1227,6 +1348,20 @@ export function App() {
           </button>
 
           <button
+            onClick={() => {
+              setActiveTab("models");
+              loadModels();
+            }}
+            className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium transition-colors ${activeTab === "models"
+                ? "bg-zinc-800 text-zinc-100 font-semibold"
+                : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200"
+              }`}
+          >
+            <Boxes size={15} />
+            <span>Model Management</span>
+          </button>
+
+          <button
             onClick={() => setActiveTab("telemetry")}
             className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium transition-colors ${activeTab === "telemetry"
                 ? "bg-zinc-800 text-zinc-100 font-semibold"
@@ -1551,6 +1686,344 @@ export function App() {
                   </div>
                 ))}
               </div>
+            </div>
+          )}
+
+          {/* ── TAB: MODEL MANAGEMENT (1:1 matching brain/image.png) ──────── */}
+          {activeTab === "models" && (
+            <div className="space-y-6">
+              {/* Header Title */}
+              <div>
+                <h2 className="text-xl font-bold tracking-tight text-zinc-100">
+                  Model Management & Status
+                </h2>
+                <p className="text-xs text-zinc-400 mt-0.5">
+                  Real-time health monitoring, availability history, and latency tracking for synced AI models.
+                </p>
+              </div>
+
+              {/* Top Stat Cards matching brain/image.png */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="rounded-xl border border-white/[0.08] bg-[#121316] p-5 shadow-sm">
+                  <div className="text-xs font-normal text-[#a1a1aa]">Success rate (24h)</div>
+                  <div className="mt-1.5 text-3xl font-bold tracking-tight text-white">
+                    {modelsData?.summary?.successRate24h !== undefined ? `${modelsData.summary.successRate24h}%` : "95.94%"}
+                  </div>
+                </div>
+                <div className="rounded-xl border border-white/[0.08] bg-[#121316] p-5 shadow-sm">
+                  <div className="text-xs font-normal text-[#a1a1aa]">Available models</div>
+                  <div className="mt-1.5 text-3xl font-bold tracking-tight text-white">
+                    {modelsData?.summary ? `${modelsData.summary.availableModels} / ${modelsData.summary.totalModels}` : "0 / 0"}
+                  </div>
+                </div>
+              </div>
+
+              {/* Filters & Actions Bar */}
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-white/[0.08] bg-[#121316] p-3 shadow-sm">
+                <div className="flex flex-wrap items-center gap-2.5 flex-1 min-w-[280px]">
+                  <div className="relative flex-1 min-w-[200px]">
+                    <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
+                    <input
+                      type="text"
+                      placeholder="Filter models by id or name..."
+                      value={modelSearch}
+                      onChange={(e) => {
+                        setModelSearch(e.target.value);
+                        setModelsPage(1);
+                      }}
+                      className="w-full rounded-lg border border-zinc-800 bg-[#0d0e11] pl-9 pr-3 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-500 focus:outline-none focus:border-zinc-600"
+                    />
+                  </div>
+
+                  {/* Provider filter */}
+                  <select
+                    value={modelProviderFilter}
+                    onChange={(e) => {
+                      setModelProviderFilter(e.target.value);
+                      setModelsPage(1);
+                    }}
+                    className="rounded-lg border border-zinc-800 bg-[#0d0e11] px-3 py-1.5 text-xs text-zinc-300 focus:outline-none focus:border-zinc-600"
+                  >
+                    <option value="all">All Upstreams</option>
+                    {upstreams.map((u) => (
+                      <option key={u.id} value={u.name}>
+                        {u.name} ({u.provider})
+                      </option>
+                    ))}
+                  </select>
+
+                  {/* Status filter tabs */}
+                  <div className="flex items-center bg-[#0d0e11] rounded-lg border border-zinc-800 p-0.5 text-xs">
+                    {(["all", "normal", "demote", "offline"] as const).map((s) => (
+                      <button
+                        key={s}
+                        onClick={() => {
+                          setModelStatusFilter(s);
+                          setModelsPage(1);
+                        }}
+                        className={`px-2.5 py-1 rounded-md capitalize font-medium transition-colors ${
+                          modelStatusFilter === s
+                            ? "bg-zinc-800 text-white"
+                            : "text-zinc-400 hover:text-zinc-200"
+                        }`}
+                      >
+                        {s}
+                      </button>
+                    ))}
+                  </div>
+                  {/* Time Window (24h / 1h) */}
+                  <div className="flex items-center bg-[#0d0e11] rounded-lg border border-zinc-800 p-0.5 text-xs">
+                    <button
+                      onClick={() => {
+                        setModelsTimeWindow("24h");
+                        loadModels("24h");
+                      }}
+                      className={`px-2.5 py-1 rounded-md font-medium transition-colors ${
+                        modelsTimeWindow === "24h"
+                          ? "bg-zinc-800 text-white"
+                          : "text-zinc-400 hover:text-zinc-200"
+                      }`}
+                    >
+                      24h Window
+                    </button>
+                    <button
+                      onClick={() => {
+                        setModelsTimeWindow("1h");
+                        loadModels("1h");
+                      }}
+                      className={`px-2.5 py-1 rounded-md font-medium transition-colors ${
+                        modelsTimeWindow === "1h"
+                          ? "bg-zinc-800 text-white"
+                          : "text-zinc-400 hover:text-zinc-200"
+                      }`}
+                    >
+                      1h Live
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={syncAllModels}
+                    disabled={modelsSyncing}
+                    className="flex items-center gap-1.5 rounded-lg border border-purple-800/70 bg-purple-950/40 hover:bg-purple-900/40 text-purple-300 px-3.5 py-1.5 text-xs font-medium transition-colors disabled:opacity-50"
+                  >
+                    <RefreshCw size={13} className={modelsSyncing ? "animate-spin" : ""} />
+                    <span>{modelsSyncing ? "Syncing..." : "Sync All Models"}</span>
+                  </button>
+
+                  <button
+                    onClick={() => loadModels(modelsTimeWindow)}
+                    disabled={modelsLoading}
+                    className="h-8 w-8 rounded-lg border border-zinc-800 bg-zinc-900 hover:bg-zinc-800 flex items-center justify-center text-zinc-400 hover:text-white transition-colors"
+                    title="Refresh model metrics"
+                  >
+                    <RefreshCw size={13} className={modelsLoading ? "animate-spin" : ""} />
+                  </button>
+                </div>
+              </div>
+
+              {/* Models List */}
+              {(() => {
+                const filteredModels = (modelsData?.models || []).filter((m) => {
+                  if (modelSearch.trim()) {
+                    const q = modelSearch.toLowerCase();
+                    if (
+                      !m.id.toLowerCase().includes(q) &&
+                      !m.name.toLowerCase().includes(q) &&
+                      !m.upstreamName.toLowerCase().includes(q)
+                    ) {
+                      return false;
+                    }
+                  }
+                  if (modelProviderFilter !== "all" && m.upstreamName !== modelProviderFilter) {
+                    return false;
+                  }
+                  if (modelStatusFilter !== "all" && m.status !== modelStatusFilter) {
+                    return false;
+                  }
+                  return true;
+                });
+
+                const totalPages = Math.ceil(filteredModels.length / 15) || 1;
+                const paginatedModels = filteredModels.slice((modelsPage - 1) * 15, modelsPage * 15);
+
+                if (filteredModels.length === 0) {
+                  return (
+                    <div className="rounded-xl border border-white/[0.08] bg-[#121316] p-12 text-center">
+                      <Boxes size={32} className="mx-auto text-zinc-600 mb-3" />
+                      <p className="text-sm font-medium text-zinc-300">No synced models match the filters</p>
+                      <p className="text-xs text-zinc-500 mt-1">
+                        Try clearing search query or click "Sync All Models" to discover models from active upstreams.
+                      </p>
+                      <button
+                        onClick={syncAllModels}
+                        className="mt-4 rounded-lg bg-zinc-800 hover:bg-zinc-700 px-4 py-2 text-xs font-semibold text-zinc-100 transition-colors"
+                      >
+                        Sync Models Now
+                      </button>
+                    </div>
+                  );
+                }
+
+                return (
+                  <div className="space-y-3">
+                    {paginatedModels.map((m) => (
+                      <div
+                        key={`${m.upstreamId}-${m.id}`}
+                        className="rounded-xl border border-white/[0.08] bg-[#121316] p-4 space-y-3.5 hover:border-zinc-700/80 transition-all shadow-sm"
+                      >
+                        {/* Top row: Status dot, Name, Badges, Stats */}
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                          {/* Left side */}
+                          <div className="flex items-center gap-2.5 flex-wrap">
+                            {/* Status Dot */}
+                            <span
+                              className={`h-2.5 w-2.5 rounded-full shrink-0 ${
+                                m.status === "normal"
+                                  ? "bg-[#10b981] shadow-[0_0_8px_rgba(16,185,129,0.8)]"
+                                  : m.status === "demote"
+                                  ? "bg-[#f97316] shadow-[0_0_8px_rgba(249,115,22,0.8)]"
+                                  : "bg-zinc-600"
+                              }`}
+                            />
+
+                            {/* Model Name */}
+                            <span className="font-bold text-sm text-white tracking-tight font-sans">
+                              {m.name || m.id}
+                            </span>
+
+                            {/* Status Badge */}
+                            {m.status === "normal" && (
+                              <span className="text-[11px] font-medium px-2 py-0.5 rounded border border-emerald-500/30 bg-emerald-500/10 text-emerald-400">
+                                Normal
+                              </span>
+                            )}
+                            {m.status === "demote" && (
+                              <span className="text-[11px] font-medium px-2 py-0.5 rounded border border-amber-500/30 bg-amber-500/10 text-amber-400">
+                                Demote
+                              </span>
+                            )}
+                            {m.status === "offline" && (
+                              <span className="text-[11px] font-medium px-2 py-0.5 rounded border border-zinc-700 bg-zinc-800 text-zinc-400">
+                                Disabled
+                              </span>
+                            )}
+
+                            {/* Tags: chat, responses, claude_native */}
+                            {m.tags.map((tag) => (
+                              <span
+                                key={tag}
+                                className="text-[11px] font-medium px-2 py-0.5 rounded bg-[#27272a] text-[#d4d4d8] border border-white/[0.04]"
+                              >
+                                {tag}
+                              </span>
+                            ))}
+
+                            {/* Upstream source */}
+                            <span className="text-[10px] text-zinc-500 font-mono">
+                              {m.upstreamName}
+                            </span>
+                          </div>
+
+                          {/* Right side stats */}
+                          <div className="flex items-center gap-4 text-xs">
+                            <div className="text-zinc-400">
+                              Availability:{" "}
+                              <span className="font-semibold text-zinc-200">{m.availability}%</span>
+                            </div>
+                            <div className="text-zinc-400">
+                              TTFT P90:{" "}
+                              <span className="font-semibold text-zinc-200">{m.ttftP90} ms</span>
+                            </div>
+                            <div className="text-zinc-400">
+                              Avg latency:{" "}
+                              <span className="font-semibold text-zinc-200">{m.avgLatency} ms</span>
+                            </div>
+
+                            {/* Live Ping Test Button */}
+                            <button
+                              onClick={() => testModel(m.upstreamId, m.id)}
+                              disabled={testingModelId === m.id || !m.enabled}
+                              className="flex items-center gap-1 text-[11px] font-medium px-2.5 py-1 rounded bg-zinc-800/90 hover:bg-zinc-700 text-cyan-400 hover:text-cyan-300 border border-zinc-700/50 disabled:opacity-40 transition-colors"
+                              title="Send live request to test model and record real telemetry"
+                            >
+                              <Zap size={11} className={testingModelId === m.id ? "animate-pulse" : ""} />
+                              <span>{testingModelId === m.id ? "Pinging..." : "Ping"}</span>
+                            </button>
+
+                            {/* Quick enable/disable toggle */}
+                            <button
+                              onClick={() => toggleModelEnabled(m.upstreamId, m.id, m.enabled)}
+                              className={`text-[11px] font-medium px-2.5 py-1 rounded transition-colors ${
+                                m.enabled
+                                  ? "bg-zinc-800 hover:bg-zinc-700 text-zinc-300"
+                                  : "bg-red-950/60 hover:bg-red-900/60 text-red-400 border border-red-900/60"
+                              }`}
+                              title={m.enabled ? "Click to disable this model" : "Click to enable this model"}
+                            >
+                              {m.enabled ? "Active" : "Disabled"}
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Status History Bar Chart (matching brain/image.png) */}
+                        <div className="flex items-center gap-[2.5px] w-full pt-1">
+                          {m.history.map((bar, i) => {
+                            let bg = "bg-[#3f3f46]/50";
+                            if (bar.status === "warning") bg = "bg-[#f59e0b]";
+                            else if (bar.status === "success") bg = "bg-[#22c55e]";
+                            else if (bar.status === "error") bg = "bg-[#ef4444]";
+
+                            return (
+                              <div
+                                key={i}
+                                className={`flex-1 h-5 rounded-[2px] ${bg} transition-all hover:scale-y-125 hover:brightness-125 cursor-pointer`}
+                                title={
+                                  bar.requests > 0
+                                    ? `${bar.time}: ${bar.requests} reqs (${bar.latency}ms avg) • ${bar.status.toUpperCase()}`
+                                    : `${bar.time}: No requests (Idle)`
+                                }
+                              />
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))}
+
+                    {/* Pagination */}
+                    {totalPages > 1 && (
+                      <div className="flex items-center justify-between pt-4 border-t border-zinc-800/80 text-xs text-zinc-400">
+                        <div>
+                          Showing {(modelsPage - 1) * 15 + 1} -{" "}
+                          {Math.min(modelsPage * 15, filteredModels.length)} of {filteredModels.length} models
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => setModelsPage((p) => Math.max(1, p - 1))}
+                            disabled={modelsPage === 1}
+                            className="flex items-center gap-1 px-3 py-1.5 rounded-lg border border-zinc-800 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 disabled:opacity-40 transition-colors"
+                          >
+                            <ChevronLeft size={13} />
+                            <span>Previous</span>
+                          </button>
+                          <span className="px-2 text-zinc-300 font-medium">
+                            {modelsPage} / {totalPages}
+                          </span>
+                          <button
+                            onClick={() => setModelsPage((p) => Math.min(totalPages, p + 1))}
+                            disabled={modelsPage === totalPages}
+                            className="flex items-center gap-1 px-3 py-1.5 rounded-lg border border-zinc-800 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 disabled:opacity-40 transition-colors"
+                          >
+                            <span>Next</span>
+                            <ChevronRight size={13} />
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
           )}
 

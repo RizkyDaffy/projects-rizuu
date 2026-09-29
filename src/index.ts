@@ -12,6 +12,7 @@ import { providersRoutes } from "./routes/providers";
 import { apiProvidersRoutes } from "./routes/api-providers";
 import { telemetryRoutes } from "./routes/telemetry";
 import { adminRoutes } from "./routes/admin";
+import { modelsRoutes } from "./routes/models";
 import { proxyRoutes } from "./routes/proxy";
 
 const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3001;
@@ -40,6 +41,7 @@ const app = new Elysia()
   .use(apiProvidersRoutes)
   .use(telemetryRoutes)
   .use(adminRoutes)
+  .use(modelsRoutes)
   .use(proxyRoutes)
   .use(staticPlugin({ assets: "public", prefix: "" }))
   .get("/", () => Bun.file("public/index.html"))

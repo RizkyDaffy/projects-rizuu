@@ -155,4 +155,97 @@ describe("Commercial Quota System", () => {
     const data = await res.json();
     expect(data.data.isActive).toBe(false);
   });
+
+  test("Upstream provider quota error is shielded and converted to router message", async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = (async () => {
+        return new Response(
+          JSON.stringify({
+            id: "chatcmpl-quota-gate-req_test",
+            object: "chat.completion",
+            model: "auto",
+            choices: [
+              {
+                index: 0,
+                message: {
+                  role: "assistant",
+                  content:
+                    "Your quota is exhausted.\nAPI key status: exceeded\nName: davey2250mZHw\nQuota: 0/50000000 tokens (0.0%)\nexp_date: 2026-10-08T02:18:49.430Z",
+                },
+                finish_reason: "stop",
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }) as any;
+
+      await app.handle(
+        new Request(`http://localhost/api/keys/${keyId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ isActive: true, tokenLimit: 1000, usedTokens: 0 }),
+        })
+      );
+
+      const res = await app.handle(
+        new Request("http://localhost/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify({ model: "gpt-4o", messages: [{ role: "user", content: "hi" }] }),
+        })
+      );
+
+      expect(res.status).toBe(503);
+      const data = await res.json();
+      expect(data.error.message).toBe("can't connect to router, we're lookin for it, try again later!");
+      expect(data.error.code).toBe("router_unavailable");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("Upstream provider streaming quota error is also shielded", async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = (async () => {
+        const stream = new ReadableStream({
+          start(controller) {
+            controller.enqueue(
+              new TextEncoder().encode(
+                'data: {"id":"chatcmpl-test","choices":[{"index":0,"delta":{"content":"Your quota is exhausted.\\nAPI key status: exceeded\\nName: davey2250mZHw\\nQuota: 0/50000000 tokens (0.0%)\\nexp_date: 2026-10-08T02:18:49.430Z"},"finish_reason":"stop"}]}\\n\\ndata: [DONE]\\n\\n'
+              )
+            );
+            controller.close();
+          },
+        });
+        return new Response(stream, {
+          status: 200,
+          headers: { "Content-Type": "text/event-stream" },
+        });
+      }) as any;
+
+      const res = await app.handle(
+        new Request("http://localhost/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify({ model: "gpt-4o", messages: [{ role: "user", content: "hi" }], stream: true }),
+        })
+      );
+
+      expect(res.status).toBe(503);
+      const data = await res.json();
+      expect(data.error.message).toBe("can't connect to router, we're lookin for it, try again later!");
+      expect(data.error.code).toBe("router_unavailable");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });

@@ -3,6 +3,7 @@ import { getDb } from "../lib/db";
 import { newId, newKey, ok } from "../lib/utils";
 import { endpointFor, authStyleFor } from "../lib/providers";
 import { randomBytes } from "crypto";
+import { isProviderQuotaError } from "./proxy";
 
 type Upstream = {
   id: string;
@@ -315,12 +316,21 @@ export const upstreamsRoutes = new Elysia({ prefix: "/api/upstreams" })
       if (!baseUrl) return ok({ models: [], message: `No endpoint configured for provider "${up.provider}". Add it to provider.json` });
       const headers = authHeadersFor(up.provider, key.key);
       const res = await fetch(`${baseUrl}/v1/models`, { headers });
-      const json = await res.json() as any;
+      const text = await res.text();
+      if (isProviderQuotaError(text)) {
+        return ok({ models: [], message: "can't connect to router, we're lookin for it, try again later!" });
+      }
+      let json: any = {};
+      try { json = JSON.parse(text); } catch (_) {}
+      if (json.error) {
+        return ok({ models: [], message: "can't connect to router, we're lookin for it, try again later!" });
+      }
       const models = (json.data ?? json.models ?? []).map((m: any) => ({ id: m.id, name: m.id, enabled: true }));
       db.prepare("UPDATE upstreams SET models = ?, updated_at = datetime('now') WHERE id = ?").run(JSON.stringify(models), params.id);
       return ok({ models });
     } catch (e) {
-      return ok({ models: [], error: String(e) });
+      const err = String(e);
+      return ok({ models: [], error: isProviderQuotaError(err) ? "can't connect to router, we're lookin for it, try again later!" : err });
     }
   })
 
@@ -358,7 +368,8 @@ export const upstreamsRoutes = new Elysia({ prefix: "/api/upstreams" })
       const res = await fetch(`${baseUrl}/v1/models`, { headers });
       return ok({ ok: res.ok, statusCode: res.status });
     } catch (e) {
-      return ok({ ok: false, error: String(e) });
+      const err = String(e);
+      return ok({ ok: false, error: isProviderQuotaError(err) ? "can't connect to router, we're lookin for it, try again later!" : err });
     }
   })
 
@@ -376,7 +387,8 @@ export const upstreamsRoutes = new Elysia({ prefix: "/api/upstreams" })
         const res = await fetch(`${baseUrl}/v1/models`, { headers });
         return { keyId: k.id, ok: res.ok, statusCode: res.status };
       } catch (e) {
-        return { keyId: k.id, ok: false, error: String(e) };
+        const err = String(e);
+        return { keyId: k.id, ok: false, error: isProviderQuotaError(err) ? "can't connect to router, we're lookin for it, try again later!" : err };
       }
     }));
     return ok({ results });
@@ -499,6 +511,7 @@ export const upstreamsRoutes = new Elysia({ prefix: "/api/upstreams" })
       const res = await fetch(`${baseUrl}/v1/models`, { headers });
       return ok({ ok: res.ok, statusCode: res.status, keyId: params.keyId });
     } catch (e) {
-      return ok({ ok: false, error: String(e), keyId: params.keyId });
+      const err = String(e);
+      return ok({ ok: false, error: isProviderQuotaError(err) ? "can't connect to router, we're lookin for it, try again later!" : err, keyId: params.keyId });
     }
   });
