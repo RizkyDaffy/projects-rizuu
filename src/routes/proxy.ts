@@ -2,6 +2,19 @@ import { Elysia } from "elysia";
 import { getDb } from "../lib/db";
 import { newId } from "../lib/utils";
 import { endpointFor, authStyleFor } from "../lib/providers";
+import {
+  checkUserQuotaAndWFQ,
+  acquireClientKeySlot,
+  releaseClientKeySlot,
+} from "../lib/quota-manager";
+import {
+  getFailoverKeysOrder,
+  acquireKeySlot,
+  releaseKeySlot,
+  recordKeyFailure,
+  clearKeyCooldown,
+  UpstreamKeyEntry,
+} from "../lib/key-balancer";
 import os from "os";
 
 type Upstream = {
@@ -36,26 +49,14 @@ type ClientKey = {
   round_robin_providers: number;
 };
 
-/** Commercial quota check.
+/** Commercial quota & WFQ arbiter check.
  * Returns null if allowed, or an error Response if blocked. */
-function checkQuota(clientKey: ClientKey): Response | null {
+function checkQuota(clientKey: ClientKey | null, db: ReturnType<typeof getDb>, targetUpstreamId?: string): Response | null {
   if (!clientKey) return null;
 
-  // Key disabled
-  if (!clientKey.is_active) {
-    return quotaError(403, "API key is inactive.", "key_inactive");
-  }
-
-  // Token limit enforced (commercial quota)
-  if (clientKey.token_limit !== null) {
-    const remaining = clientKey.token_limit - clientKey.used_tokens;
-    if (remaining <= 0) {
-      return quotaError(402, "Your quota has been exhausted. Purchase additional tokens to continue.", "quota_exhausted", {
-        tokenLimit: clientKey.token_limit,
-        usedTokens: clientKey.used_tokens,
-        remainingTokens: 0,
-      });
-    }
+  const res = checkUserQuotaAndWFQ(clientKey, db, targetUpstreamId);
+  if (!res.allowed) {
+    return quotaError(res.status, res.message, res.code, res.meta);
   }
 
   return null;
@@ -143,7 +144,7 @@ function rankCandidates(upstreams: Upstream[], requestedModel: string | null): C
   return weightedOrder(upstreams).map((u) => ({ upstream: u, forwardModel: requestedModel ?? "" }));
 }
 
-// ── Upstream error shielding (commercial branding) ─────────────────────────
+//  Upstream error shielding (commercial branding) ─
 // Raw upstream/provider errors NEVER reach clients: bodies, provider names,
 // billing URLs, request ids are all replaced by one generic Rizuu message.
 export function genericUpstreamError(): Response {
@@ -208,7 +209,7 @@ async function screenUpstreamResponse(
 
   const ct = r.headers.get("content-type") ?? "";
 
-  // ── SSE stream: buffer initial chunks, verify validity, shield errors ──
+  //  SSE stream: buffer initial chunks, verify validity, shield errors 
   if (ct.includes("text/event-stream")) {
     if (!r.body) return { ok: false, res: null };
     const reader = r.body.getReader();
@@ -304,7 +305,7 @@ async function screenUpstreamResponse(
           return;
         }
         try {
-          for (;;) {
+          for (; ;) {
             const { value, done } = await reader.read();
             if (done) break;
             controller.enqueue(value);
@@ -319,7 +320,7 @@ async function screenUpstreamResponse(
     return { ok: true, res: new Response(stream, { status: r.status, headers }) };
   }
 
-  // ── Buffered body: must contain a chat completion and NOT contain provider quota/error ──
+  //  Buffered body: must contain a chat completion and NOT contain provider quota/error 
   const text = await r.text().catch(() => "");
   if (!text) return { ok: false, res: null };
 
@@ -475,7 +476,7 @@ function getClientKey(
   if (!rawKey) return null;
   return (
     (db
-      .prepare("SELECT * FROM client_keys WHERE key = ? AND is_active = 1")
+      .prepare("SELECT * FROM client_keys WHERE key = ?")
       .get(rawKey) as ClientKey) ?? null
   );
 }
@@ -578,9 +579,9 @@ async function handleChatCompletions(request: Request): Promise<Response> {
   const rawKey = authHeader.replace(/^Bearer\s+/i, "");
   const clientKey = getClientKey(db, rawKey);
 
-  // ── QUOTA CHECK ──────────────────────────────────────────────────────
+  //  QUOTA & WFQ CHECK 
   if (clientKey) {
-    const blocked = checkQuota(clientKey);
+    const blocked = checkQuota(clientKey, db);
     if (blocked) return blocked;
   }
 
@@ -610,38 +611,121 @@ async function handleChatCompletions(request: Request): Promise<Response> {
   let usedUpstream: Upstream | null = null;
   let attemptedUpstream: Upstream | null = null;
 
-  for (let i = 0; i < candidates.length; i++) {
-    const cand = candidates[i];
-    const upKey = getUpstreamKey(cand.upstream.id, !!cand.upstream.round_robin, db);
-    if (!upKey) continue;
-    attemptedUpstream = cand.upstream;
-
-    let sendBody = bodyText;
-    if (bodyObj && requestedModel && cand.forwardModel && cand.forwardModel !== requestedModel) {
-      bodyObj.model = cand.forwardModel;
-      sendBody = JSON.stringify(bodyObj);
+  let clientSlotHeld = false;
+  if (clientKey) {
+    acquireClientKeySlot(clientKey.id);
+    clientSlotHeld = true;
+  }
+  const releaseClientSlot = () => {
+    if (clientSlotHeld && clientKey) {
+      clientSlotHeld = false;
+      releaseClientKeySlot(clientKey.id);
     }
+  };
 
-    const patchedReq = new Request(request.url, {
-      method: request.method,
-      headers: request.headers,
-      body: sendBody,
-    });
+  try {
+    for (let i = 0; i < candidates.length; i++) {
+      const cand = candidates[i];
+      const keys = db
+        .prepare("SELECT id, upstream_id, name, key, is_active, quota_limit FROM upstream_keys WHERE upstream_id = ? AND is_active = 1")
+        .all(cand.upstream.id) as UpstreamKeyEntry[];
+      if (!keys.length) continue;
 
-    try {
-      const r = await proxyRequest(patchedReq, cand.upstream.provider, cand.upstream, upKey.key);
-      const screened = await screenUpstreamResponse(r, "openai");
-      if (screened.ok && screened.res) {
-        res = screened.res;
-        usedUpstream = cand.upstream;
-        break;
+      // Partitioned key distribution + failover order
+      const candidateKeys = getFailoverKeysOrder(keys);
+      let candidateSuccess = false;
+
+      for (const upKey of candidateKeys) {
+        attemptedUpstream = cand.upstream;
+
+        let sendBody = bodyText;
+        if (bodyObj && requestedModel && cand.forwardModel && cand.forwardModel !== requestedModel) {
+          bodyObj.model = cand.forwardModel;
+          sendBody = JSON.stringify(bodyObj);
+        }
+
+        const patchedReq = new Request(request.url, {
+          method: request.method,
+          headers: request.headers,
+          body: sendBody,
+        });
+
+        acquireKeySlot(upKey.id);
+        let keySlotHeld = true;
+
+        try {
+          const r = await proxyRequest(patchedReq, cand.upstream.provider, cand.upstream, upKey.key);
+          const screened = await screenUpstreamResponse(r, "openai");
+          if (screened.ok && screened.res) {
+            clearKeyCooldown(upKey.id);
+            res = screened.res;
+            usedUpstream = cand.upstream;
+            candidateSuccess = true;
+
+            const isStream = res.headers.get("content-type")?.includes("text/event-stream");
+            if (isStream && res.body) {
+              const reader = res.body.getReader();
+              const keyId = upKey.id;
+              const wrappedStream = new ReadableStream({
+                async start(controller) {
+                  try {
+                    while (true) {
+                      const { done, value } = await reader.read();
+                      if (done) break;
+                      controller.enqueue(value);
+                    }
+                    controller.close();
+                  } catch (err) {
+                    controller.error(err);
+                  } finally {
+                    if (keySlotHeld) {
+                      keySlotHeld = false;
+                      releaseKeySlot(keyId);
+                    }
+                    releaseClientSlot();
+                  }
+                },
+                cancel(reason) {
+                  if (keySlotHeld) {
+                    keySlotHeld = false;
+                    releaseKeySlot(keyId);
+                  }
+                  releaseClientSlot();
+                  return reader.cancel(reason);
+                },
+              });
+
+              res = new Response(wrappedStream, {
+                status: res.status,
+                headers: res.headers,
+              });
+            } else {
+              if (keySlotHeld) {
+                keySlotHeld = false;
+                releaseKeySlot(upKey.id);
+              }
+            }
+            break;
+          }
+
+          recordKeyFailure(upKey.id, r.status, "Provider failure or screened quota error");
+          try {
+            await Promise.resolve(r.body?.cancel()).catch(() => { });
+          } catch (_) { }
+        } catch (err: any) {
+          recordKeyFailure(upKey.id, 503, String(err?.message || "Network error"));
+        } finally {
+          if (keySlotHeld) {
+            keySlotHeld = false;
+            releaseKeySlot(upKey.id);
+          }
+        }
       }
-      // Upstream error: non-2xx, or 200 carrying error JSON/SSE (quota,
-      // no credits, billing...) — raw body discarded, next candidate tried.
-      try {
-        await Promise.resolve(r.body?.cancel()).catch(() => {});
-      } catch (_) { }
-    } catch (_) { }
+
+      if (candidateSuccess) break;
+    }
+  } finally {
+    releaseClientSlot();
   }
 
   const latency = Date.now() - start;
@@ -677,9 +761,9 @@ async function handleMessages(request: Request): Promise<Response> {
     (request.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "");
   const clientKey = getClientKey(db, rawKey);
 
-  // ── QUOTA CHECK ──────────────────────────────────────────────────────
+  //  QUOTA & WFQ CHECK 
   if (clientKey) {
-    const blocked = checkQuota(clientKey);
+    const blocked = checkQuota(clientKey, db);
     if (blocked) return blocked;
   }
 
@@ -709,38 +793,121 @@ async function handleMessages(request: Request): Promise<Response> {
   let usedUpstream: Upstream | null = null;
   let attemptedUpstream: Upstream | null = null;
 
-  for (let i = 0; i < candidates.length; i++) {
-    const cand = candidates[i];
-    const upKey = getUpstreamKey(cand.upstream.id, !!cand.upstream.round_robin, db);
-    if (!upKey) continue;
-    attemptedUpstream = cand.upstream;
-
-    let sendBody = bodyText;
-    if (bodyObj && requestedModel && cand.forwardModel && cand.forwardModel !== requestedModel) {
-      bodyObj.model = cand.forwardModel;
-      sendBody = JSON.stringify(bodyObj);
+  let clientSlotHeld = false;
+  if (clientKey) {
+    acquireClientKeySlot(clientKey.id);
+    clientSlotHeld = true;
+  }
+  const releaseClientSlot = () => {
+    if (clientSlotHeld && clientKey) {
+      clientSlotHeld = false;
+      releaseClientKeySlot(clientKey.id);
     }
+  };
 
-    const patchedReq = new Request(request.url, {
-      method: request.method,
-      headers: request.headers,
-      body: sendBody,
-    });
+  try {
+    for (let i = 0; i < candidates.length; i++) {
+      const cand = candidates[i];
+      const keys = db
+        .prepare("SELECT id, upstream_id, name, key, is_active, quota_limit FROM upstream_keys WHERE upstream_id = ? AND is_active = 1")
+        .all(cand.upstream.id) as UpstreamKeyEntry[];
+      if (!keys.length) continue;
 
-    try {
-      const r = await proxyRequest(patchedReq, "anthropic", cand.upstream, upKey.key);
-      const screened = await screenUpstreamResponse(r, "anthropic");
-      if (screened.ok && screened.res) {
-        res = screened.res;
-        usedUpstream = cand.upstream;
-        break;
+      // Partitioned key distribution + failover order
+      const candidateKeys = getFailoverKeysOrder(keys);
+      let candidateSuccess = false;
+
+      for (const upKey of candidateKeys) {
+        attemptedUpstream = cand.upstream;
+
+        let sendBody = bodyText;
+        if (bodyObj && requestedModel && cand.forwardModel && cand.forwardModel !== requestedModel) {
+          bodyObj.model = cand.forwardModel;
+          sendBody = JSON.stringify(bodyObj);
+        }
+
+        const patchedReq = new Request(request.url, {
+          method: request.method,
+          headers: request.headers,
+          body: sendBody,
+        });
+
+        acquireKeySlot(upKey.id);
+        let keySlotHeld = true;
+
+        try {
+          const r = await proxyRequest(patchedReq, "anthropic", cand.upstream, upKey.key);
+          const screened = await screenUpstreamResponse(r, "anthropic");
+          if (screened.ok && screened.res) {
+            clearKeyCooldown(upKey.id);
+            res = screened.res;
+            usedUpstream = cand.upstream;
+            candidateSuccess = true;
+
+            const isStream = res.headers.get("content-type")?.includes("text/event-stream");
+            if (isStream && res.body) {
+              const reader = res.body.getReader();
+              const keyId = upKey.id;
+              const wrappedStream = new ReadableStream({
+                async start(controller) {
+                  try {
+                    while (true) {
+                      const { done, value } = await reader.read();
+                      if (done) break;
+                      controller.enqueue(value);
+                    }
+                    controller.close();
+                  } catch (err) {
+                    controller.error(err);
+                  } finally {
+                    if (keySlotHeld) {
+                      keySlotHeld = false;
+                      releaseKeySlot(keyId);
+                    }
+                    releaseClientSlot();
+                  }
+                },
+                cancel(reason) {
+                  if (keySlotHeld) {
+                    keySlotHeld = false;
+                    releaseKeySlot(keyId);
+                  }
+                  releaseClientSlot();
+                  return reader.cancel(reason);
+                },
+              });
+
+              res = new Response(wrappedStream, {
+                status: res.status,
+                headers: res.headers,
+              });
+            } else {
+              if (keySlotHeld) {
+                keySlotHeld = false;
+                releaseKeySlot(upKey.id);
+              }
+            }
+            break;
+          }
+
+          recordKeyFailure(upKey.id, r.status, "Provider failure or screened quota error");
+          try {
+            await Promise.resolve(r.body?.cancel()).catch(() => { });
+          } catch (_) { }
+        } catch (err: any) {
+          recordKeyFailure(upKey.id, 503, String(err?.message || "Network error"));
+        } finally {
+          if (keySlotHeld) {
+            keySlotHeld = false;
+            releaseKeySlot(upKey.id);
+          }
+        }
       }
-      // Upstream error: non-2xx, or 200 carrying error JSON/SSE (quota,
-      // billing, request ids) — raw body discarded, next candidate tried.
-      try {
-        await Promise.resolve(r.body?.cancel()).catch(() => {});
-      } catch (_) { }
-    } catch (_) { }
+
+      if (candidateSuccess) break;
+    }
+  } finally {
+    releaseClientSlot();
   }
 
   const latency = Date.now() - start;
@@ -780,11 +947,11 @@ export const proxyRoutes = new Elysia()
       return genericUpstreamError();
     }
   })
-  // ──── Gateway info ────────────────────────────────────────────────────────
+  //  Gateway info 
   .get("/v1", () => gatewayInfo())
   .get("/v1/", () => gatewayInfo())
 
-  // ──── Model list (public) ──────────────────────────────────────────────
+  //  Model list (public) 
   .get("/v1/models", () => {
     const db = getDb();
     return buildModelList(db);
@@ -794,21 +961,21 @@ export const proxyRoutes = new Elysia()
     return buildModelList(db);
   })
 
-  // ──── POST /v1 & POST /v1/ — Gateway root proxy alias ─────────────────
+  //  POST /v1 & POST /v1/ — Gateway root proxy alias ─
   .post("/v1", ({ request }) => handleAutoPost(request))
   .post("/v1/", ({ request }) => handleAutoPost(request))
 
-  // ──── POST /v1/chat/completions — OpenAI-compatible proxy ─────────────
+  //  POST /v1/chat/completions — OpenAI-compatible proxy ─
   .post("/v1/chat/completions", ({ request }) => handleChatCompletions(request))
   .post("/chat/completions", ({ request }) => handleChatCompletions(request))
   .post("/v1/completions", ({ request }) => handleChatCompletions(request))
   .post("/completions", ({ request }) => handleChatCompletions(request))
 
-  // ──── POST /v1/messages — Anthropic-compatible proxy ──────────────────
+  //  POST /v1/messages — Anthropic-compatible proxy 
   .post("/v1/messages", ({ request }) => handleMessages(request))
   .post("/messages", ({ request }) => handleMessages(request));
 
-// ── helpers ────────────────────────────────────────────────────────────────
+//  helpers 
 function buildModelList(db: ReturnType<typeof getDb>) {
   const upstreams = db.prepare("SELECT * FROM upstreams WHERE is_active = 1").all() as Upstream[];
   const created = Math.floor(Date.now() / 1000);

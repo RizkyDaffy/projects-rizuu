@@ -766,7 +766,7 @@ export function App() {
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col font-sans">
-      {/* ── 1:1 CONFIRMATION MODAL (MATCHING brain/image.png) ─────────────── */}
+      {/*  1:1 CONFIRMATION MODAL (MATCHING brain/image.png) ─ */}
       <ConfirmDeleteModal
         isOpen={deleteConfirm.isOpen}
         title={deleteConfirm.type === "key" ? "Hapus Client Key" : "Hapus Upstream Provider"}
@@ -776,7 +776,7 @@ export function App() {
         onConfirm={handleExecuteDelete}
       />
 
-      {/* ── MODAL: GENERATE CLIENT KEY (PORTALED) ──────────────────────── */}
+      {/*  MODAL: GENERATE CLIENT KEY (PORTALED)  */}
       {showGenerateModal && (
         <FloatingPortal id="portal-root">
           <div className="fixed inset-0 z-[9990] flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm animate-in fade-in-0">
@@ -856,8 +856,8 @@ export function App() {
                           type="button"
                           onClick={() => setGenTokens(chip.val)}
                           className={`rounded-md border py-1.5 text-xs font-medium transition-colors ${genTokens === chip.val
-                              ? "border-zinc-400 bg-zinc-800 text-zinc-100"
-                              : "border-zinc-800 bg-zinc-950 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+                            ? "border-zinc-400 bg-zinc-800 text-zinc-100"
+                            : "border-zinc-800 bg-zinc-950 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
                             }`}
                         >
                           {chip.label}
@@ -900,7 +900,7 @@ export function App() {
         </FloatingPortal>
       )}
 
-      {/* ── MODAL: TOP UP QUOTA (PORTALED) ─────────────────────────────── */}
+      {/*  MODAL: TOP UP QUOTA (PORTALED) ─ */}
       {topupKey && (
         <FloatingPortal id="portal-root">
           <div className="fixed inset-0 z-[9990] flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm animate-in fade-in-0">
@@ -970,8 +970,8 @@ export function App() {
                         type="button"
                         onClick={() => setTopupAmount(chip.val)}
                         className={`rounded-md border py-1.5 text-xs font-medium transition-colors ${topupAmount === chip.val
-                            ? "border-amber-500 bg-amber-950/60 text-amber-300"
-                            : "border-zinc-800 bg-zinc-950 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+                          ? "border-amber-500 bg-amber-950/60 text-amber-300"
+                          : "border-zinc-800 bg-zinc-950 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
                           }`}
                       >
                         +{chip.label}
@@ -1024,7 +1024,7 @@ export function App() {
         </FloatingPortal>
       )}
 
-      {/* ── MODAL: EDIT KEY (PORTALED) ─────────────────────────────────── */}
+      {/*  MODAL: EDIT KEY (PORTALED) ─ */}
       {editKeyItem && (
         <FloatingPortal id="portal-root">
           <div className="fixed inset-0 z-[9990] flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm animate-in fade-in-0">
@@ -1098,7 +1098,7 @@ export function App() {
         </FloatingPortal>
       )}
 
-      {/* ── MODAL: EDIT UPSTREAM PROVIDER (PORTALED) ────────────────────── */}
+      {/*  MODAL: EDIT UPSTREAM PROVIDER (PORTALED)  */}
       {editUpstreamItem && (
         <FloatingPortal id="portal-root">
           <div className="fixed inset-0 z-[9990] flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm animate-in fade-in-0">
@@ -1252,7 +1252,7 @@ export function App() {
         </FloatingPortal>
       )}
 
-      {/* ── TOP NAVBAR ─────────────────────────────────────────────────── */}
+      {/*  TOP NAVBAR ─ */}
       <header className="sticky top-0 z-40 border-b border-zinc-800/80 bg-zinc-950/80 backdrop-blur-md px-6 py-3 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <div className="h-8 w-8 rounded-lg bg-zinc-100 flex items-center justify-center text-zinc-950 font-bold shadow-sm">
@@ -1317,7 +1317,7 @@ export function App() {
         </div>
       </header>
 
-      {/* ── MAIN LAYOUT ─────────────────────────────────────────────────── */}
+      {/*  MAIN LAYOUT ─ */}
       <div className="flex flex-1">
         {/* Sidebar */}
         <aside className="w-60 border-r border-zinc-800/80 bg-zinc-950 p-4 space-y-1.5 flex flex-col">
@@ -1328,8 +1328,8 @@ export function App() {
           <button
             onClick={() => setActiveTab("keys")}
             className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium transition-colors ${activeTab === "keys"
-                ? "bg-zinc-800 text-zinc-100 font-semibold"
-                : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200"
+              ? "bg-zinc-800 text-zinc-100 font-semibold"
+              : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200"
               }`}
           >
             <Key size={15} />
@@ -1339,8 +1339,8 @@ export function App() {
           <button
             onClick={() => setActiveTab("upstreams")}
             className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium transition-colors ${activeTab === "upstreams"
-                ? "bg-zinc-800 text-zinc-100 font-semibold"
-                : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200"
+              ? "bg-zinc-800 text-zinc-100 font-semibold"
+              : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200"
               }`}
           >
             <Layers size={15} />
@@ -1353,8 +1353,8 @@ export function App() {
               loadModels();
             }}
             className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium transition-colors ${activeTab === "models"
-                ? "bg-zinc-800 text-zinc-100 font-semibold"
-                : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200"
+              ? "bg-zinc-800 text-zinc-100 font-semibold"
+              : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200"
               }`}
           >
             <Boxes size={15} />
@@ -1364,8 +1364,8 @@ export function App() {
           <button
             onClick={() => setActiveTab("telemetry")}
             className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium transition-colors ${activeTab === "telemetry"
-                ? "bg-zinc-800 text-zinc-100 font-semibold"
-                : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200"
+              ? "bg-zinc-800 text-zinc-100 font-semibold"
+              : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200"
               }`}
           >
             <Activity size={15} />
@@ -1375,8 +1375,8 @@ export function App() {
           <button
             onClick={() => setActiveTab("admin")}
             className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium transition-colors ${activeTab === "admin"
-                ? "bg-zinc-800 text-zinc-100 font-semibold"
-                : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200"
+              ? "bg-zinc-800 text-zinc-100 font-semibold"
+              : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200"
               }`}
           >
             <Sliders size={15} />
@@ -1386,7 +1386,7 @@ export function App() {
 
         {/* Content Area */}
         <main className="flex-1 p-8 overflow-y-auto">
-          {/* ── TAB 1: CLIENT KEYS & COMMERCIAL QUOTAS ────────────────────── */}
+          {/*  TAB 1: CLIENT KEYS & COMMERCIAL QUOTAS  */}
           {activeTab === "keys" && (
             <div className="space-y-6">
               <div className="flex items-center justify-between">
@@ -1468,10 +1468,10 @@ export function App() {
                                 <div className="h-1.5 w-full rounded-full bg-zinc-800 overflow-hidden">
                                   <div
                                     className={`h-full rounded-full transition-all duration-300 ${k.quotaExhausted
-                                        ? "bg-red-500"
-                                        : percent > 80
-                                          ? "bg-amber-400"
-                                          : "bg-emerald-400"
+                                      ? "bg-red-500"
+                                      : percent > 80
+                                        ? "bg-amber-400"
+                                        : "bg-emerald-400"
                                       }`}
                                     style={{ width: `${percent}%` }}
                                   />
@@ -1511,7 +1511,7 @@ export function App() {
                               )}
                             </td>
 
-                            {/* ── ROBUST HEADLESS PORTAL 3-DOT MENU ───────── */}
+                            {/*  ROBUST HEADLESS PORTAL 3-DOT MENU ─ */}
                             <td className="py-3 px-4 text-right">
                               <KeyActionMenu
                                 k={k}
@@ -1539,7 +1539,7 @@ export function App() {
             </div>
           )}
 
-          {/* ── TAB 2: UPSTREAMS ─────────────────────────────────────────── */}
+          {/*  TAB 2: UPSTREAMS ─ */}
           {activeTab === "upstreams" && (
             <div className="space-y-6">
               <div>
@@ -1567,10 +1567,10 @@ export function App() {
                         <div className="flex items-center gap-2.5">
                           <span
                             className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded border ${p.provider === "openai"
-                                ? "border-blue-800 bg-blue-950/70 text-blue-300"
-                                : p.provider === "anthropic"
-                                  ? "border-purple-800 bg-purple-950/70 text-purple-300"
-                                  : "border-amber-800 bg-amber-950/70 text-amber-300"
+                              ? "border-blue-800 bg-blue-950/70 text-blue-300"
+                              : p.provider === "anthropic"
+                                ? "border-purple-800 bg-purple-950/70 text-purple-300"
+                                : "border-amber-800 bg-amber-950/70 text-amber-300"
                               }`}
                           >
                             {p.provider}
@@ -1643,10 +1643,10 @@ export function App() {
                         <span className="font-semibold text-sm text-zinc-200">{u.name}</span>
                         <span
                           className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded border ${u.provider === "openai"
-                              ? "border-blue-800 bg-blue-950/70 text-blue-300"
-                              : u.provider === "anthropic"
-                                ? "border-purple-800 bg-purple-950/70 text-purple-300"
-                                : "border-amber-800 bg-amber-950/70 text-amber-300"
+                            ? "border-blue-800 bg-blue-950/70 text-blue-300"
+                            : u.provider === "anthropic"
+                              ? "border-purple-800 bg-purple-950/70 text-purple-300"
+                              : "border-amber-800 bg-amber-950/70 text-amber-300"
                             }`}
                         >
                           {u.provider}
@@ -1689,7 +1689,7 @@ export function App() {
             </div>
           )}
 
-          {/* ── TAB: MODEL MANAGEMENT (1:1 matching brain/image.png) ──────── */}
+          {/*  TAB: MODEL MANAGEMENT (1:1 matching brain/image.png)  */}
           {activeTab === "models" && (
             <div className="space-y-6">
               {/* Header Title */}
@@ -1761,11 +1761,10 @@ export function App() {
                           setModelStatusFilter(s);
                           setModelsPage(1);
                         }}
-                        className={`px-2.5 py-1 rounded-md capitalize font-medium transition-colors ${
-                          modelStatusFilter === s
+                        className={`px-2.5 py-1 rounded-md capitalize font-medium transition-colors ${modelStatusFilter === s
                             ? "bg-zinc-800 text-white"
                             : "text-zinc-400 hover:text-zinc-200"
-                        }`}
+                          }`}
                       >
                         {s}
                       </button>
@@ -1778,11 +1777,10 @@ export function App() {
                         setModelsTimeWindow("24h");
                         loadModels("24h");
                       }}
-                      className={`px-2.5 py-1 rounded-md font-medium transition-colors ${
-                        modelsTimeWindow === "24h"
+                      className={`px-2.5 py-1 rounded-md font-medium transition-colors ${modelsTimeWindow === "24h"
                           ? "bg-zinc-800 text-white"
                           : "text-zinc-400 hover:text-zinc-200"
-                      }`}
+                        }`}
                     >
                       24h Window
                     </button>
@@ -1791,11 +1789,10 @@ export function App() {
                         setModelsTimeWindow("1h");
                         loadModels("1h");
                       }}
-                      className={`px-2.5 py-1 rounded-md font-medium transition-colors ${
-                        modelsTimeWindow === "1h"
+                      className={`px-2.5 py-1 rounded-md font-medium transition-colors ${modelsTimeWindow === "1h"
                           ? "bg-zinc-800 text-white"
                           : "text-zinc-400 hover:text-zinc-200"
-                      }`}
+                        }`}
                     >
                       1h Live
                     </button>
@@ -1879,13 +1876,12 @@ export function App() {
                           <div className="flex items-center gap-2.5 flex-wrap">
                             {/* Status Dot */}
                             <span
-                              className={`h-2.5 w-2.5 rounded-full shrink-0 ${
-                                m.status === "normal"
+                              className={`h-2.5 w-2.5 rounded-full shrink-0 ${m.status === "normal"
                                   ? "bg-[#10b981] shadow-[0_0_8px_rgba(16,185,129,0.8)]"
                                   : m.status === "demote"
-                                  ? "bg-[#f97316] shadow-[0_0_8px_rgba(249,115,22,0.8)]"
-                                  : "bg-zinc-600"
-                              }`}
+                                    ? "bg-[#f97316] shadow-[0_0_8px_rgba(249,115,22,0.8)]"
+                                    : "bg-zinc-600"
+                                }`}
                             />
 
                             {/* Model Name */}
@@ -1955,11 +1951,10 @@ export function App() {
                             {/* Quick enable/disable toggle */}
                             <button
                               onClick={() => toggleModelEnabled(m.upstreamId, m.id, m.enabled)}
-                              className={`text-[11px] font-medium px-2.5 py-1 rounded transition-colors ${
-                                m.enabled
+                              className={`text-[11px] font-medium px-2.5 py-1 rounded transition-colors ${m.enabled
                                   ? "bg-zinc-800 hover:bg-zinc-700 text-zinc-300"
                                   : "bg-red-950/60 hover:bg-red-900/60 text-red-400 border border-red-900/60"
-                              }`}
+                                }`}
                               title={m.enabled ? "Click to disable this model" : "Click to enable this model"}
                             >
                               {m.enabled ? "Active" : "Disabled"}
@@ -2027,7 +2022,7 @@ export function App() {
             </div>
           )}
 
-          {/* ── TAB 3: TELEMETRY ─────────────────────────────────────────── */}
+          {/*  TAB 3: TELEMETRY ─ */}
           {activeTab === "telemetry" && (
             <div className="space-y-6">
               <div>
@@ -2121,7 +2116,7 @@ export function App() {
             </div>
           )}
 
-          {/* ── TAB 4: ENGINE SETTINGS ────────────────────────────────────── */}
+          {/*  TAB 4: ENGINE SETTINGS  */}
           {activeTab === "admin" && (
             <div className="space-y-6">
               <div>

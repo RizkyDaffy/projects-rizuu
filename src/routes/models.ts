@@ -302,6 +302,7 @@ export const modelsRoutes = new Elysia({ prefix: "/api/models" })
           method: "POST",
           headers,
           body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(2500),
         });
 
         status = res.status;

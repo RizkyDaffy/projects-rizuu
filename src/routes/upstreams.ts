@@ -5,6 +5,8 @@ import { endpointFor, authStyleFor } from "../lib/providers";
 import { randomBytes } from "crypto";
 import { isProviderQuotaError } from "./proxy";
 
+import { getProviderGlobalQuota } from "../lib/quota-manager";
+
 type Upstream = {
   id: string;
   name: string;
@@ -15,6 +17,8 @@ type Upstream = {
   round_robin: number;
   follow_upstream: number;
   is_active: number;
+  quota_limit: number | null;
+  quota_baseline: number;
   models: string;
   created_at: string;
   updated_at: string;
@@ -25,6 +29,7 @@ type UpstreamKey = {
   upstream_id: string;
   name: string | null;
   key: string;
+  quota_limit: number | null;
   is_active: number;
   created_at: string;
 };
@@ -36,6 +41,8 @@ function parseUpstream(row: Upstream) {
     isActive: !!row.is_active,
     roundRobin: !!row.round_robin,
     followUpstream: !!row.follow_upstream,
+    quotaLimit: row.quota_limit ?? null,
+    quotaBaseline: row.quota_baseline ?? 0,
     models: JSON.parse(row.models),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -46,6 +53,7 @@ function parseUpKey(row: UpstreamKey) {
   return {
     ...row,
     isActive: !!row.is_active,
+    quotaLimit: row.quota_limit ?? null,
     createdAt: row.created_at,
   };
 }
@@ -165,8 +173,8 @@ export const upstreamsRoutes = new Elysia({ prefix: "/api/upstreams" })
       const keyEntries = body.keyEntries ?? rawKeyList.map((k) => ({ key: k, isActive: true }));
 
       db.prepare(
-        `INSERT INTO upstreams (id, name, provider, prefix, base_url, weight, round_robin, follow_upstream, models)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO upstreams (id, name, provider, prefix, base_url, weight, round_robin, follow_upstream, quota_limit, quota_baseline, models)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(
         id,
         body.name,
@@ -176,13 +184,15 @@ export const upstreamsRoutes = new Elysia({ prefix: "/api/upstreams" })
         body.weight ?? 1,
         body.roundRobin ? 1 : 0,
         body.followUpstream ? 1 : 0,
+        body.quotaLimit ?? null,
+        body.quotaBaseline ?? 0,
         JSON.stringify(body.models ?? [])
       );
 
       for (const entry of keyEntries) {
         db.prepare(
-          "INSERT INTO upstream_keys (id, upstream_id, name, key, is_active) VALUES (?, ?, ?, ?, ?)"
-        ).run(newId(), id, entry.name ?? null, entry.key, entry.isActive !== false ? 1 : 0);
+          "INSERT INTO upstream_keys (id, upstream_id, name, key, quota_limit, is_active) VALUES (?, ?, ?, ?, ?, ?)"
+        ).run(newId(), id, entry.name ?? null, entry.key, (entry as any).quotaLimit ?? null, entry.isActive !== false ? 1 : 0);
       }
 
       const row = db.prepare("SELECT * FROM upstreams WHERE id = ?").get(id) as Upstream;
@@ -197,7 +207,9 @@ export const upstreamsRoutes = new Elysia({ prefix: "/api/upstreams" })
         apiKey: t.Optional(t.String()),
         apiKeys: t.Optional(t.Array(t.String())),
         rawKeys: t.Optional(t.String()),
-        keyEntries: t.Optional(t.Array(t.Object({ id: t.Optional(t.String()), name: t.Optional(t.String()), key: t.String(), isActive: t.Optional(t.Boolean()) }))),
+        quotaLimit: t.Optional(t.Nullable(t.Number())),
+        quotaBaseline: t.Optional(t.Number()),
+        keyEntries: t.Optional(t.Array(t.Object({ id: t.Optional(t.String()), name: t.Optional(t.String()), key: t.String(), quotaLimit: t.Optional(t.Nullable(t.Number())), isActive: t.Optional(t.Boolean()) }))),
         baseUrl: t.Optional(t.String()),
         weight: t.Optional(t.Number()),
         roundRobin: t.Optional(t.Boolean()),
@@ -206,6 +218,14 @@ export const upstreamsRoutes = new Elysia({ prefix: "/api/upstreams" })
       }),
     }
   )
+
+  // GET /api/upstreams/:id/quota
+  .get("/:id/quota", ({ params, set }) => {
+    const db = getDb();
+    const row = db.prepare("SELECT * FROM upstreams WHERE id = ?").get(params.id) as Upstream | undefined;
+    if (!row) { set.status = 404; return { success: false, error: "Upstream not found" }; }
+    return ok(getProviderGlobalQuota(params.id, db));
+  })
 
   // GET /api/upstreams/:id
   .get("/:id", ({ params, set }) => {
@@ -235,6 +255,8 @@ export const upstreamsRoutes = new Elysia({ prefix: "/api/upstreams" })
       if (body.roundRobin !== undefined) { updates.push("round_robin = ?"); values.push(body.roundRobin ? 1 : 0); }
       if (body.weight !== undefined) { updates.push("weight = ?"); values.push(body.weight); }
       if (body.followUpstream !== undefined) { updates.push("follow_upstream = ?"); values.push(body.followUpstream ? 1 : 0); }
+      if (body.quotaLimit !== undefined) { updates.push("quota_limit = ?"); values.push(body.quotaLimit); }
+      if (body.quotaBaseline !== undefined) { updates.push("quota_baseline = ?"); values.push(body.quotaBaseline); }
       if (body.models !== undefined) { updates.push("models = ?"); values.push(JSON.stringify(body.models)); }
 
       if (updates.length > 0) {
@@ -262,10 +284,11 @@ export const upstreamsRoutes = new Elysia({ prefix: "/api/upstreams" })
             if (entry.name !== undefined) { fields.push("name = ?"); vals.push(entry.name); }
             if (entry.key !== undefined) { fields.push("key = ?"); vals.push(entry.key); }
             if (entry.isActive !== undefined) { fields.push("is_active = ?"); vals.push(entry.isActive ? 1 : 0); }
+            if (entry.quotaLimit !== undefined) { fields.push("quota_limit = ?"); vals.push(entry.quotaLimit); }
             if (fields.length) { vals.push(entry.id); db.prepare(`UPDATE upstream_keys SET ${fields.join(", ")} WHERE id = ?`).run(...vals); }
           } else {
-            db.prepare("INSERT INTO upstream_keys (id, upstream_id, name, key, is_active) VALUES (?, ?, ?, ?, ?)").run(
-              newId(), params.id, entry.name ?? null, entry.key, entry.isActive !== false ? 1 : 0
+            db.prepare("INSERT INTO upstream_keys (id, upstream_id, name, key, quota_limit, is_active) VALUES (?, ?, ?, ?, ?, ?)").run(
+              newId(), params.id, entry.name ?? null, entry.key, entry.quotaLimit ?? null, entry.isActive !== false ? 1 : 0
             );
           }
         }
@@ -283,7 +306,9 @@ export const upstreamsRoutes = new Elysia({ prefix: "/api/upstreams" })
         apiKey: t.Optional(t.String()),
         apiKeys: t.Optional(t.Array(t.String())),
         rawKeys: t.Optional(t.String()),
-        keyEntries: t.Optional(t.Array(t.Object({ id: t.Optional(t.String()), name: t.Optional(t.String()), key: t.Optional(t.String()), isActive: t.Optional(t.Boolean()) }))),
+        quotaLimit: t.Optional(t.Nullable(t.Number())),
+        quotaBaseline: t.Optional(t.Number()),
+        keyEntries: t.Optional(t.Array(t.Object({ id: t.Optional(t.String()), name: t.Optional(t.String()), key: t.Optional(t.String()), quotaLimit: t.Optional(t.Nullable(t.Number())), isActive: t.Optional(t.Boolean()) }))),
         baseUrl: t.Optional(t.Nullable(t.String())),
         isActive: t.Optional(t.Boolean()),
         roundRobin: t.Optional(t.Boolean()),

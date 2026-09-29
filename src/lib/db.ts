@@ -66,6 +66,8 @@ function initSchema(db: Database) {
       round_robin INTEGER NOT NULL DEFAULT 0,
       follow_upstream INTEGER NOT NULL DEFAULT 0,
       is_active INTEGER NOT NULL DEFAULT 1,
+      quota_limit REAL,
+      quota_baseline REAL NOT NULL DEFAULT 0,
       models TEXT NOT NULL DEFAULT '[]',
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -78,10 +80,16 @@ function initSchema(db: Database) {
       upstream_id TEXT NOT NULL REFERENCES upstreams(id) ON DELETE CASCADE,
       name TEXT,
       key TEXT NOT NULL,
+      quota_limit REAL,
       is_active INTEGER NOT NULL DEFAULT 1,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     )
   `);
+
+  // Migrate existing tables if missing new columns
+  try { db.run("ALTER TABLE upstreams ADD COLUMN quota_limit REAL"); } catch (_) {}
+  try { db.run("ALTER TABLE upstreams ADD COLUMN quota_baseline REAL NOT NULL DEFAULT 0"); } catch (_) {}
+  try { db.run("ALTER TABLE upstream_keys ADD COLUMN quota_limit REAL"); } catch (_) {}
 
   db.run(`
     CREATE TABLE IF NOT EXISTS telemetry_logs (
