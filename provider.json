@@ -18,7 +18,8 @@
   {
     "provider": "ryuzumi",
     "label": "Ryuzumi AI",
-    "endpoint": "https://router.ryzumi.net/v1"
+    "endpoint": "https://router.ryzumi.net/v1",
+    "quota": "https://router.ryzumi.net/v1/quota"
   },
   {
     "provider": "agentrouter",

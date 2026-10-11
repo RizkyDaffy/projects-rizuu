@@ -90,12 +90,20 @@ function initSchema(db: Database) {
   try { db.run("ALTER TABLE upstreams ADD COLUMN quota_limit REAL"); } catch (_) {}
   try { db.run("ALTER TABLE upstreams ADD COLUMN quota_baseline REAL NOT NULL DEFAULT 0"); } catch (_) {}
   try { db.run("ALTER TABLE upstream_keys ADD COLUMN quota_limit REAL"); } catch (_) {}
+  // Live quota columns (populated by intercepting provider quota-gate responses)
+  try { db.run("ALTER TABLE upstream_keys ADD COLUMN live_quota_used REAL"); } catch (_) {}
+  try { db.run("ALTER TABLE upstream_keys ADD COLUMN live_quota_total REAL"); } catch (_) {}
+  try { db.run("ALTER TABLE upstream_keys ADD COLUMN live_quota_name TEXT"); } catch (_) {}
+  try { db.run("ALTER TABLE upstream_keys ADD COLUMN live_quota_status TEXT"); } catch (_) {}
+  try { db.run("ALTER TABLE upstream_keys ADD COLUMN live_quota_exp_date TEXT"); } catch (_) {}
+  try { db.run("ALTER TABLE upstream_keys ADD COLUMN live_quota_checked_at TEXT"); } catch (_) {}
 
   db.run(`
     CREATE TABLE IF NOT EXISTS telemetry_logs (
       id TEXT PRIMARY KEY,
       client_key_id TEXT,
       upstream_id TEXT,
+      upstream_key_id TEXT,
       model TEXT,
       prompt_tokens INTEGER NOT NULL DEFAULT 0,
       completion_tokens INTEGER NOT NULL DEFAULT 0,
@@ -105,6 +113,8 @@ function initSchema(db: Database) {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     )
   `);
+
+  try { db.run("ALTER TABLE telemetry_logs ADD COLUMN upstream_key_id TEXT"); } catch (_) {}
 
   // Default settings
   const insert = db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)");

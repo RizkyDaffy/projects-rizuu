@@ -5,6 +5,7 @@ export type ProviderEntry = {
   provider: string;
   label?: string;
   endpoint: string;
+  quota?: string;
   auth?: "openai" | "anthropic";
 };
 
@@ -31,6 +32,7 @@ export function loadProviders(): ProviderEntry[] {
         provider: String(e.provider),
         label: typeof e.label === "string" ? e.label : undefined,
         endpoint: normalizeEndpoint(String(e.endpoint)),
+        quota: typeof e.quota === "string" && e.quota.trim() ? e.quota.trim() : undefined,
         auth: e.auth === "anthropic" ? "anthropic" : e.auth === "openai" ? "openai" : undefined,
       }));
     cache = { mtimeMs: st.mtimeMs, list };
@@ -41,11 +43,23 @@ export function loadProviders(): ProviderEntry[] {
 }
 
 export function findProvider(provider: string): ProviderEntry | undefined {
-  return loadProviders().find((p) => p.provider === provider);
+  const norm = provider.toLowerCase().trim();
+  const list = loadProviders();
+  return list.find((p) => {
+    const pnorm = p.provider.toLowerCase();
+    if (pnorm === norm) return true;
+    // Allow ryzumi / ryuzumi alias match
+    if ((norm === "ryzumi" || norm === "ryuzumi") && (pnorm === "ryzumi" || pnorm === "ryuzumi")) return true;
+    return false;
+  });
 }
 
 export function endpointFor(provider: string): string | null {
   return findProvider(provider)?.endpoint ?? null;
+}
+
+export function quotaEndpointFor(provider: string): string | null {
+  return findProvider(provider)?.quota ?? null;
 }
 
 export function authStyleFor(provider: string): "openai" | "anthropic" {

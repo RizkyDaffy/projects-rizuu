@@ -15,6 +15,12 @@ import {
   clearKeyCooldown,
   UpstreamKeyEntry,
 } from "../lib/key-balancer";
+import {
+  updateKeyLiveQuota,
+  parseQuotaMessage,
+  parseQuotaPlanName,
+  parseQuotaExpDate,
+} from "../lib/live-quota";
 import os from "os";
 
 type Upstream = {
@@ -194,6 +200,34 @@ export function isProviderQuotaError(text: string): boolean {
 
 type Screened = { ok: boolean; res: Response | null };
 
+/** Optional context for persisting live provider quota before a screened-out body is discarded. */
+type QuotaCaptureCtx = { db: ReturnType<typeof getDb>; keyId: string } | undefined;
+
+/**
+ * Persist live provider-reported quota numbers from a quota-gate message
+ * BEFORE the screened body is discarded. Best-effort: never throws.
+ */
+function captureLiveQuota(text: string, ctx: QuotaCaptureCtx): void {
+  if (!ctx || !text) return;
+  try {
+    const parsed = parseQuotaMessage(text);
+    updateKeyLiveQuota(ctx.db, ctx.keyId, {
+      used: parsed?.used ?? 0,
+      total: parsed?.total ?? 0,
+      name: parseQuotaPlanName(text),
+      status: "exceeded",
+      expDate: parseQuotaExpDate(text),
+    });
+  } catch (_) { }
+}
+
+/** isProviderQuotaError + live-quota capture in one step. */
+function captureQuotaScreen(text: string, ctx: QuotaCaptureCtx): boolean {
+  if (!isProviderQuotaError(text)) return false;
+  captureLiveQuota(text, ctx);
+  return true;
+}
+
 /**
  * Body-level error screening: relays return quota/credit errors with HTTP 200
  * (plain text, error JSON without `error` key, or SSE `data: {...}` frames).
@@ -203,7 +237,8 @@ type Screened = { ok: boolean; res: Response | null };
  */
 async function screenUpstreamResponse(
   r: Response,
-  format: "openai" | "anthropic" = "openai"
+  format: "openai" | "anthropic" = "openai",
+  quotaCtx?: QuotaCaptureCtx
 ): Promise<Screened> {
   if (!r.ok) return { ok: false, res: null };
 
@@ -228,7 +263,7 @@ async function screenUpstreamResponse(
       chunks.push(value);
       accumulatedText += new TextDecoder().decode(value);
 
-      if (isProviderQuotaError(accumulatedText)) {
+      if (captureQuotaScreen(accumulatedText, quotaCtx)) {
         try { reader.cancel(); } catch (_) { }
         return { ok: false, res: null };
       }
@@ -243,6 +278,11 @@ async function screenUpstreamResponse(
           try {
             const data = JSON.parse(trimmed.slice(5).trim());
             if (data.error || data.error_code || (typeof data.id === "string" && /quota-gate/i.test(data.id))) {
+              // Persist live quota from structured error frames before discarding
+              captureLiveQuota(
+                typeof data.error === "string" ? data.error : JSON.stringify(data),
+                quotaCtx
+              );
               seenError = true;
               break;
             }
@@ -281,7 +321,7 @@ async function screenUpstreamResponse(
       return { ok: false, res: null };
     }
 
-    if (isProviderQuotaError(accumulatedText)) {
+    if (captureQuotaScreen(accumulatedText, quotaCtx)) {
       try { reader.cancel(); } catch (_) { }
       return { ok: false, res: null };
     }
@@ -324,7 +364,7 @@ async function screenUpstreamResponse(
   const text = await r.text().catch(() => "");
   if (!text) return { ok: false, res: null };
 
-  if (isProviderQuotaError(text)) {
+  if (captureQuotaScreen(text, quotaCtx)) {
     return { ok: false, res: null };
   }
 
@@ -444,16 +484,18 @@ function recordUsage(
   model: string | null,
   tokens: { prompt_tokens: number; completion_tokens: number; total_tokens: number },
   latency: number,
-  status: number
+  status: number,
+  upstreamKeyId?: string | null
 ) {
   db.prepare(
     `INSERT INTO telemetry_logs
-       (id, client_key_id, upstream_id, model, prompt_tokens, completion_tokens, total_tokens, latency_ms, status)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       (id, client_key_id, upstream_id, upstream_key_id, model, prompt_tokens, completion_tokens, total_tokens, latency_ms, status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     newId(),
     clientKey?.id ?? null,
     upstream.id,
+    upstreamKeyId ?? null,
     model,
     tokens.prompt_tokens,
     tokens.completion_tokens,
@@ -609,7 +651,9 @@ async function handleChatCompletions(request: Request): Promise<Response> {
   const candidates = rankCandidates(upstreams, requestedModel);
   let res: Response | null = null;
   let usedUpstream: Upstream | null = null;
+  let usedKeyId: string | null = null;
   let attemptedUpstream: Upstream | null = null;
+  let attemptedKeyId: string | null = null;
 
   let clientSlotHeld = false;
   if (clientKey) {
@@ -637,6 +681,7 @@ async function handleChatCompletions(request: Request): Promise<Response> {
 
       for (const upKey of candidateKeys) {
         attemptedUpstream = cand.upstream;
+        attemptedKeyId = upKey.id;
 
         let sendBody = bodyText;
         if (bodyObj && requestedModel && cand.forwardModel && cand.forwardModel !== requestedModel) {
@@ -655,11 +700,12 @@ async function handleChatCompletions(request: Request): Promise<Response> {
 
         try {
           const r = await proxyRequest(patchedReq, cand.upstream.provider, cand.upstream, upKey.key);
-          const screened = await screenUpstreamResponse(r, "openai");
+          const screened = await screenUpstreamResponse(r, "openai", { db, keyId: upKey.id });
           if (screened.ok && screened.res) {
             clearKeyCooldown(upKey.id);
             res = screened.res;
             usedUpstream = cand.upstream;
+            usedKeyId = upKey.id;
             candidateSuccess = true;
 
             const isStream = res.headers.get("content-type")?.includes("text/event-stream");
@@ -733,7 +779,7 @@ async function handleChatCompletions(request: Request): Promise<Response> {
   if (!res) {
     if (attemptedUpstream) {
       try {
-        recordUsage(db, clientKey, attemptedUpstream, requestedModel, { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }, latency, 503);
+        recordUsage(db, clientKey, attemptedUpstream, requestedModel, { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }, latency, 503, attemptedKeyId);
       } catch (_) { }
     }
     return genericUpstreamError();
@@ -745,7 +791,7 @@ async function handleChatCompletions(request: Request): Promise<Response> {
     const tokens = isStream
       ? { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
       : await extractTokens(res, "openai");
-    recordUsage(db, clientKey, usedUpstream!, requestedModel, tokens, latency, res.status);
+    recordUsage(db, clientKey, usedUpstream!, requestedModel, tokens, latency, res.status, usedKeyId);
   } catch (_) { }
 
   return res;
@@ -791,7 +837,9 @@ async function handleMessages(request: Request): Promise<Response> {
   const candidates = rankCandidates(upstreams, requestedModel);
   let res: Response | null = null;
   let usedUpstream: Upstream | null = null;
+  let usedKeyId: string | null = null;
   let attemptedUpstream: Upstream | null = null;
+  let attemptedKeyId: string | null = null;
 
   let clientSlotHeld = false;
   if (clientKey) {
@@ -819,6 +867,7 @@ async function handleMessages(request: Request): Promise<Response> {
 
       for (const upKey of candidateKeys) {
         attemptedUpstream = cand.upstream;
+        attemptedKeyId = upKey.id;
 
         let sendBody = bodyText;
         if (bodyObj && requestedModel && cand.forwardModel && cand.forwardModel !== requestedModel) {
@@ -837,11 +886,12 @@ async function handleMessages(request: Request): Promise<Response> {
 
         try {
           const r = await proxyRequest(patchedReq, "anthropic", cand.upstream, upKey.key);
-          const screened = await screenUpstreamResponse(r, "anthropic");
+          const screened = await screenUpstreamResponse(r, "anthropic", { db, keyId: upKey.id });
           if (screened.ok && screened.res) {
             clearKeyCooldown(upKey.id);
             res = screened.res;
             usedUpstream = cand.upstream;
+            usedKeyId = upKey.id;
             candidateSuccess = true;
 
             const isStream = res.headers.get("content-type")?.includes("text/event-stream");
@@ -915,7 +965,7 @@ async function handleMessages(request: Request): Promise<Response> {
   if (!res) {
     if (attemptedUpstream) {
       try {
-        recordUsage(db, clientKey, attemptedUpstream, requestedModel, { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }, latency, 503);
+        recordUsage(db, clientKey, attemptedUpstream, requestedModel, { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }, latency, 503, attemptedKeyId);
       } catch (_) { }
     }
     return genericUpstreamError();
@@ -926,7 +976,7 @@ async function handleMessages(request: Request): Promise<Response> {
     const tokens = isStream
       ? { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
       : await extractTokens(res, "anthropic");
-    recordUsage(db, clientKey, usedUpstream!, requestedModel, tokens, latency, res.status);
+    recordUsage(db, clientKey, usedUpstream!, requestedModel, tokens, latency, res.status, usedKeyId);
   } catch (_) { }
 
   return res;

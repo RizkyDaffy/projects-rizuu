@@ -28,6 +28,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Sparkles,
+  Server,
 } from "lucide-react";
 import {
   useFloating,
@@ -111,6 +112,61 @@ type ModelSummary = {
   availableModels: number;
   totalModels: number;
   activeUpstreams: number;
+};
+
+type ProviderKeyLiveQuota = {
+  used: number;
+  total: number;
+  name: string | null;
+  status: string | null;
+  expDate: string | null;
+  checkedAt: string;
+};
+
+type ProviderKeyOverview = {
+  id: string;
+  name: string;
+  keyMasked: string;
+  quotaLimit: number | null;
+  inFlight: number;
+  inCooldown: boolean;
+  isActive: boolean;
+  partitionRange: string;
+  liveQuota: ProviderKeyLiveQuota | null;
+};
+
+type ProviderOverviewItem = {
+  id: string;
+  name: string;
+  provider: string;
+  endpoint: string;
+  weight: number;
+  roundRobin: boolean;
+  isActive: boolean;
+  modelsCount: number;
+  availability: number;
+  avgLatency: number;
+  globalQuota: {
+    capacity: number;
+    used: number;
+    remaining: number;
+    usedPercent: number;
+    availablePercent: number;
+    exhausted: boolean;
+    mode: "dedicated" | "global";
+  };
+  keys: ProviderKeyOverview[];
+  history: HistoryBar[];
+};
+
+type ProviderOverviewSummary = {
+  totalAllocatedTokens: number;
+  totalUsedTokens: number;
+  totalRemainingTokens: number;
+  totalProviders: number;
+  activeProviders: number;
+  activeKeysCount: number;
+  totalInFlightCount: number;
 };
 
 /**
@@ -316,12 +372,22 @@ function KeyActionMenu({ k, onTopup, onEdit, onRotate, onReset, onDelete }: KeyA
 }
 
 export function App() {
-  const [activeTab, setActiveTab] = useState<"keys" | "upstreams" | "models" | "telemetry" | "admin">("keys");
+  const [activeTab, setActiveTab] = useState<"keys" | "upstreams" | "providers" | "models" | "telemetry" | "admin">("keys");
   const [authStatus, setAuthStatus] = useState<boolean>(false);
   const [pinInput, setPinInput] = useState("");
   const [keys, setKeys] = useState<KeyItem[]>([]);
   const [upstreams, setUpstreams] = useState<UpstreamItem[]>([]);
   const [telemetryLogs, setTelemetryLogs] = useState<TelemetryLog[]>([]);
+
+  // Provider Overview State
+  const [providerOverviewData, setProviderOverviewData] = useState<{
+    summary: ProviderOverviewSummary;
+    providers: ProviderOverviewItem[];
+  } | null>(null);
+  const [providerOverviewLoading, setProviderOverviewLoading] = useState(false);
+  const [providerOverviewTimeWindow, setProviderOverviewTimeWindow] = useState<"24h" | "1h">("24h");
+  const [providerOverviewSearch, setProviderOverviewSearch] = useState("");
+  const [providerOverviewTypeFilter, setProviderOverviewTypeFilter] = useState("all");
 
   // Model Management State (1:1 matching brain/image.png)
   const [modelsData, setModelsData] = useState<{ summary: ModelSummary; models: ModelManagementItem[] } | null>(null);
@@ -476,6 +542,18 @@ export function App() {
     } catch (e) { }
   };
 
+  const loadProvidersOverview = async (win = providerOverviewTimeWindow) => {
+    setProviderOverviewLoading(true);
+    try {
+      const res = await fetch(`/api/providers/overview?window=${win}`);
+      const json = await res.json();
+      if (json.data) setProviderOverviewData(json.data);
+    } catch (e) { }
+    finally {
+      setProviderOverviewLoading(false);
+    }
+  };
+
   const loadModels = async (win = modelsTimeWindow) => {
     setModelsLoading(true);
     try {
@@ -553,6 +631,7 @@ export function App() {
   const loadAll = () => {
     loadKeys();
     loadUpstreams();
+    loadProvidersOverview();
     loadModels();
     loadTelemetry();
     loadAdmin();
@@ -1349,6 +1428,20 @@ export function App() {
 
           <button
             onClick={() => {
+              setActiveTab("providers");
+              loadProvidersOverview();
+            }}
+            className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium transition-colors ${activeTab === "providers"
+              ? "bg-zinc-800 text-zinc-100 font-semibold"
+              : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200"
+              }`}
+          >
+            <Server size={15} />
+            <span>Provider Overview</span>
+          </button>
+
+          <button
+            onClick={() => {
               setActiveTab("models");
               loadModels();
             }}
@@ -1686,6 +1779,427 @@ export function App() {
                   </div>
                 ))}
               </div>
+            </div>
+          )}
+
+          {/* ── TAB: PROVIDER OVERVIEW (MULTI-KEY QUOTAS & PARTITIONS) ── */}
+          {activeTab === "providers" && (
+            <div className="space-y-6">
+              {/* Header Title */}
+              <div>
+                <h2 className="text-xl font-bold tracking-tight text-zinc-100 flex items-center gap-2">
+                  <Server size={20} className="text-purple-400" />
+                  <span>Provider Overview & Multi-Key Quotas</span>
+                </h2>
+                <p className="text-xs text-zinc-400 mt-0.5">
+                  Real-time upstream provider monitoring, dynamic load partitioning across active keys, and aggregated global provider quotas.
+                </p>
+              </div>
+
+              {/* Top Stat Cards matching Model Management */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                <div className="rounded-xl border border-white/[0.08] bg-[#121316] p-5 shadow-sm">
+                  <div className="text-xs font-normal text-[#a1a1aa]">Total Provider Quota</div>
+                  <div className="mt-1.5 text-2xl font-bold tracking-tight text-white font-mono">
+                    {providerOverviewData?.summary?.totalAllocatedTokens ? formatTokens(providerOverviewData.summary.totalAllocatedTokens) : "0"}
+                  </div>
+                  <div className="mt-1 text-[11px] text-emerald-400 font-mono">
+                    {providerOverviewData?.summary?.totalRemainingTokens ? `${providerOverviewData.summary.totalRemainingTokens.toLocaleString()} tokens remaining` : "0 remaining"}
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-white/[0.08] bg-[#121316] p-5 shadow-sm">
+                  <div className="text-xs font-normal text-[#a1a1aa]">Active In-Flight Load</div>
+                  <div className="mt-1.5 text-2xl font-bold tracking-tight text-emerald-400 font-mono flex items-center gap-2">
+                    <Zap size={18} className={providerOverviewData?.summary?.totalInFlightCount ? "animate-pulse text-amber-400" : "text-emerald-500"} />
+                    <span>{providerOverviewData?.summary?.totalInFlightCount ?? 0}</span>
+                    <span className="text-xs font-normal text-zinc-400 font-sans">concurrent</span>
+                  </div>
+                  <div className="mt-1 text-[11px] text-zinc-500">
+                    Partitioned across {providerOverviewData?.summary?.activeKeysCount ?? 0} active keys
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-white/[0.08] bg-[#121316] p-5 shadow-sm">
+                  <div className="text-xs font-normal text-[#a1a1aa]">Active Upstreams</div>
+                  <div className="mt-1.5 text-2xl font-bold tracking-tight text-white font-mono">
+                    {providerOverviewData?.summary ? `${providerOverviewData.summary.activeProviders} / ${providerOverviewData.summary.totalProviders}` : "0 / 0"}
+                  </div>
+                  <div className="mt-1 text-[11px] text-zinc-500">
+                    OpenAI, Anthropic & Relays
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-white/[0.08] bg-[#121316] p-5 shadow-sm">
+                  <div className="text-xs font-normal text-[#a1a1aa]">Total Tokens Consumed</div>
+                  <div className="mt-1.5 text-2xl font-bold tracking-tight text-zinc-300 font-mono">
+                    {providerOverviewData?.summary?.totalUsedTokens ? formatTokens(providerOverviewData.summary.totalUsedTokens) : "0"}
+                  </div>
+                  <div className="mt-1 text-[11px] text-zinc-500">
+                    Tracked from telemetry logs
+                  </div>
+                </div>
+              </div>
+
+              {/* Filters & Actions Bar */}
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-white/[0.08] bg-[#121316] p-3 shadow-sm">
+                <div className="flex flex-wrap items-center gap-2.5 flex-1 min-w-[280px]">
+                  <div className="relative flex-1 min-w-[200px]">
+                    <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
+                    <input
+                      type="text"
+                      placeholder="Filter providers by name or provider..."
+                      value={providerOverviewSearch}
+                      onChange={(e) => setProviderOverviewSearch(e.target.value)}
+                      className="w-full rounded-lg border border-zinc-800 bg-[#0d0e11] pl-9 pr-3 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-500 focus:outline-none focus:border-zinc-600"
+                    />
+                  </div>
+
+                  {/* Provider type filter */}
+                  <select
+                    value={providerOverviewTypeFilter}
+                    onChange={(e) => setProviderOverviewTypeFilter(e.target.value)}
+                    className="rounded-lg border border-zinc-800 bg-[#0d0e11] px-3 py-1.5 text-xs text-zinc-300 focus:outline-none focus:border-zinc-600"
+                  >
+                    <option value="all">All Provider Types</option>
+                    <option value="openai">OpenAI</option>
+                    <option value="anthropic">Anthropic</option>
+                    <option value="ryzumi">Ryzumi</option>
+                    <option value="bandelbanget">BandelBanget</option>
+                    <option value="agentrouter">AgentRouter</option>
+                  </select>
+
+                  {/* Time Window (24h / 1h) */}
+                  <div className="flex items-center bg-[#0d0e11] rounded-lg border border-zinc-800 p-0.5 text-xs">
+                    <button
+                      onClick={() => {
+                        setProviderOverviewTimeWindow("24h");
+                        loadProvidersOverview("24h");
+                      }}
+                      className={`px-2.5 py-1 rounded-md font-medium transition-colors ${
+                        providerOverviewTimeWindow === "24h"
+                          ? "bg-zinc-800 text-white"
+                          : "text-zinc-400 hover:text-zinc-200"
+                      }`}
+                    >
+                      24h Window
+                    </button>
+                    <button
+                      onClick={() => {
+                        setProviderOverviewTimeWindow("1h");
+                        loadProvidersOverview("1h");
+                      }}
+                      className={`px-2.5 py-1 rounded-md font-medium transition-colors ${
+                        providerOverviewTimeWindow === "1h"
+                          ? "bg-zinc-800 text-white"
+                          : "text-zinc-400 hover:text-zinc-200"
+                      }`}
+                    >
+                      1h Live
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => loadProvidersOverview(providerOverviewTimeWindow)}
+                    disabled={providerOverviewLoading}
+                    className="flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 px-3.5 py-1.5 text-xs font-medium transition-colors disabled:opacity-50"
+                    title="Refresh provider quotas and metrics"
+                  >
+                    <RefreshCw size={13} className={providerOverviewLoading ? "animate-spin" : ""} />
+                    <span>Refresh</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Providers List */}
+              {(() => {
+                const filteredProviders = (providerOverviewData?.providers || []).filter((p) => {
+                  if (providerOverviewSearch.trim()) {
+                    const q = providerOverviewSearch.toLowerCase();
+                    if (!p.name.toLowerCase().includes(q) && !p.provider.toLowerCase().includes(q) && !p.endpoint.toLowerCase().includes(q)) {
+                      return false;
+                    }
+                  }
+                  if (providerOverviewTypeFilter !== "all" && p.provider.toLowerCase() !== providerOverviewTypeFilter.toLowerCase()) {
+                    return false;
+                  }
+                  return true;
+                });
+
+                if (filteredProviders.length === 0) {
+                  return (
+                    <div className="rounded-xl border border-white/[0.08] bg-[#121316] p-12 text-center">
+                      <Server size={32} className="mx-auto text-zinc-600 mb-3" />
+                      <p className="text-sm font-medium text-zinc-300">No AI upstream providers match filters</p>
+                      <p className="text-xs text-zinc-500 mt-1">
+                        Add upstream providers in the AI Upstreams tab to view multi-key load partitioning and quotas.
+                      </p>
+                      <button
+                        onClick={() => setActiveTab("upstreams")}
+                        className="mt-4 rounded-lg bg-zinc-800 hover:bg-zinc-700 px-4 py-2 text-xs font-semibold text-zinc-100 transition-colors"
+                      >
+                        Manage Upstreams
+                      </button>
+                    </div>
+                  );
+                }
+
+                return (
+                  <div className="space-y-4">
+                    {filteredProviders.map((p) => (
+                      <div
+                        key={p.id}
+                        className="rounded-xl border border-white/[0.08] bg-[#121316] p-5 space-y-4 hover:border-zinc-700/80 transition-all shadow-sm"
+                      >
+                        {/* Provider Header Row */}
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                          <div className="flex items-center gap-2.5 flex-wrap">
+                            {/* Status Dot */}
+                            <span
+                              className={`h-2.5 w-2.5 rounded-full shrink-0 ${
+                                p.isActive
+                                  ? p.globalQuota.exhausted
+                                    ? "bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.8)]"
+                                    : "bg-[#10b981] shadow-[0_0_8px_rgba(16,185,129,0.8)]"
+                                  : "bg-zinc-600"
+                              }`}
+                            />
+
+                            {/* Provider Name */}
+                            <span className="font-bold text-base text-white tracking-tight">
+                              {p.name}
+                            </span>
+
+                            {/* Provider Type Badge */}
+                            <span className="text-[11px] font-medium px-2 py-0.5 rounded bg-purple-950/60 text-purple-300 border border-purple-800/40 font-mono">
+                              {p.provider}
+                            </span>
+
+                            {/* Keys Count Badge */}
+                            <span className="text-[11px] font-medium px-2 py-0.5 rounded bg-blue-950/50 text-blue-300 border border-blue-800/40 font-mono">
+                              {p.keys.length} {p.keys.length === 1 ? "Key" : "Keys"} (Balanced)
+                            </span>
+
+                            {/* Endpoint Badge */}
+                            <span className="text-[11px] text-zinc-500 font-mono truncate max-w-[260px]" title={p.endpoint}>
+                              {p.endpoint}
+                            </span>
+                          </div>
+
+                          {/* Right side stats & status */}
+                          <div className="flex items-center gap-4 text-xs">
+                            <div className="text-zinc-400">
+                              Availability: <span className="font-semibold text-zinc-200">{p.availability}%</span>
+                            </div>
+                            <div className="text-zinc-400">
+                              Avg Latency: <span className="font-semibold text-zinc-200">{p.avgLatency} ms</span>
+                            </div>
+                            <div className="text-zinc-400">
+                              Weight: <span className="font-semibold text-zinc-200">{p.weight}</span>
+                            </div>
+                            <span
+                              className={`text-[11px] font-medium px-2.5 py-0.5 rounded ${
+                                p.isActive
+                                  ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/30"
+                                  : "bg-zinc-800 text-zinc-400 border border-zinc-700"
+                              }`}
+                            >
+                              {p.isActive ? "Active" : "Disabled"}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* ── GLOBAL QUOTA UX BAR (Aggregated 1+2+3...) ── */}
+                        <div className="rounded-lg border border-white/[0.05] bg-[#0c0d0f] p-3.5 space-y-2.5">
+                          <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-mono">
+                            {/* Left: REMAINING TOKENS [used (pct%)] */}
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="font-semibold text-zinc-300 uppercase tracking-wide text-[11px]">
+                                REMAINING TOKENS
+                              </span>
+                              <span className="font-bold text-emerald-400 text-sm">
+                                {p.globalQuota.remaining.toLocaleString()}
+                              </span>
+                              <span className="text-zinc-400 text-[11px]">
+                                [{p.globalQuota.used.toLocaleString()} tokens used ({p.globalQuota.usedPercent}%)]
+                              </span>
+                            </div>
+
+                            {/* Right: TOTAL ALLOCATED (avail%) */}
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="text-zinc-400 uppercase tracking-wide text-[11px]">
+                                TOTAL ALLOCATED
+                              </span>
+                              <span className="font-bold text-white text-sm">
+                                {p.globalQuota.capacity.toLocaleString()}
+                              </span>
+                              <span className="text-emerald-400 text-[11px] font-semibold">
+                                ({p.globalQuota.availablePercent}% available)
+                              </span>
+                            </div>
+                          </div>
+
+                          {/* Progress bar visual: used (filled) vs remaining (available) */}
+                          <div className="relative w-full h-3 rounded-full bg-zinc-800/90 overflow-hidden border border-zinc-700/60 flex">
+                            <div
+                              className={`h-full transition-all duration-500 ${
+                                p.globalQuota.usedPercent >= 95
+                                  ? "bg-gradient-to-r from-amber-500 to-red-500"
+                                  : p.globalQuota.usedPercent >= 80
+                                  ? "bg-gradient-to-r from-blue-500 to-amber-500"
+                                  : "bg-gradient-to-r from-cyan-500 to-emerald-500"
+                              }`}
+                              style={{ width: `${Math.min(100, Math.max(0, p.globalQuota.usedPercent))}%` }}
+                              title={`Used: ${p.globalQuota.used.toLocaleString()} tokens (${p.globalQuota.usedPercent}%)`}
+                            />
+                            <div
+                              className="h-full bg-emerald-500/30 transition-all duration-500"
+                              style={{ width: `${Math.min(100, Math.max(0, p.globalQuota.availablePercent))}%` }}
+                              title={`Available: ${p.globalQuota.remaining.toLocaleString()} tokens (${p.globalQuota.availablePercent}%)`}
+                            />
+                          </div>
+                        </div>
+
+                        {/* ── MULTI-KEY BARS SECTION: Primary (1), Key 1 (2), Key 2 (3)... ── */}
+                        <div className="space-y-2 pt-1">
+                          <div className="flex items-center justify-between text-[11px] font-semibold text-zinc-400 uppercase tracking-wider px-1">
+                            <span>Provider Keys & Dynamic Partitions ({p.keys.length} Keys)</span>
+                            <span className="text-zinc-500 lowercase font-normal">dynamic partitioning • real-time in-flight tracking</span>
+                          </div>
+
+                          <div className="grid grid-cols-1 gap-2.5">
+                            {p.keys.map((k) => (
+                              <div
+                                key={k.id}
+                                className="rounded-lg border border-white/[0.04] bg-[#16171b] p-3 flex flex-wrap items-center justify-between gap-3 hover:border-zinc-700 transition-colors"
+                              >
+                                {/* Left: Key identity + Partition Range */}
+                                <div className="flex items-center gap-3 flex-wrap">
+                                  <span className="font-semibold text-xs text-white font-mono flex items-center gap-1.5">
+                                    <Key size={12} className="text-cyan-400" />
+                                    <span>{k.name}</span>
+                                  </span>
+
+                                  <span className="text-[11px] font-mono text-zinc-400 bg-zinc-900 px-2 py-0.5 rounded border border-zinc-800">
+                                    {k.keyMasked}
+                                  </span>
+
+                                  {/* Dynamic Partition Range Allocation */}
+                                  <span className="text-[11px] font-medium px-2 py-0.5 rounded bg-blue-950/60 text-blue-300 border border-blue-800/50 font-mono">
+                                    {k.partitionRange}
+                                  </span>
+
+                                  {/* In-Flight Active Requests Badge */}
+                                  {k.inFlight > 0 ? (
+                                    <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse flex items-center gap-1">
+                                      <Zap size={10} />
+                                      <span>{k.inFlight} in-flight active</span>
+                                    </span>
+                                  ) : (
+                                    <span className="text-[11px] font-mono text-zinc-500 px-2 py-0.5 rounded bg-zinc-900/60 border border-zinc-800/60">
+                                      0 in-flight (Ready)
+                                    </span>
+                                  )}
+
+                                  {/* Key Cooldown / Health */}
+                                  {k.inCooldown ? (
+                                    <span className="text-[11px] font-medium px-2 py-0.5 rounded bg-red-950/60 text-red-400 border border-red-800/50">
+                                      Cooldown (429/5xx)
+                                    </span>
+                                  ) : k.isActive ? (
+                                    <span className="text-[11px] font-medium px-2 py-0.5 rounded bg-emerald-950/40 text-emerald-400 border border-emerald-800/40">
+                                      Active
+                                    </span>
+                                  ) : (
+                                    <span className="text-[11px] font-medium px-2 py-0.5 rounded bg-zinc-900 text-zinc-500 border border-zinc-800">
+                                      Disabled
+                                    </span>
+                                  )}
+                                </div>
+
+                                {/* Right: Key Quota Allocation + Live Provider-Reported Quota */}
+                                <div className="text-xs font-mono text-zinc-300 flex flex-col items-end gap-1">
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-zinc-500 text-[11px]">Allocated Quota:</span>
+                                    <span className="font-semibold text-white">
+                                      {k.quotaLimit ? `${k.quotaLimit.toLocaleString()} tokens` : "Shared Global"}
+                                    </span>
+                                  </div>
+
+                                  {k.liveQuota && (
+                                    <div className="flex items-center gap-2">
+                                      <span
+                                        className={`text-[11px] px-2 py-0.5 rounded border font-medium ${
+                                          k.liveQuota.status === "exceeded" || (k.liveQuota.total > 0 && k.liveQuota.used >= k.liveQuota.total)
+                                            ? "bg-red-950/60 text-red-400 border-red-800/50"
+                                            : k.liveQuota.total > 0
+                                              ? "bg-cyan-950/40 text-cyan-300 border-cyan-800/40"
+                                              : "bg-zinc-900 text-zinc-400 border-zinc-800"
+                                        }`}
+                                        title={`Live provider quota${k.liveQuota.name ? ` (${k.liveQuota.name})` : ""} • checked ${k.liveQuota.checkedAt}${k.liveQuota.expDate ? ` • expires ${k.liveQuota.expDate}` : ""}`}
+                                      >
+                                        {k.liveQuota.total > 0
+                                          ? `Live: ${k.liveQuota.used.toLocaleString()}/${k.liveQuota.total.toLocaleString()}`
+                                          : k.liveQuota.status
+                                            ? `Live: ${k.liveQuota.status}`
+                                            : "Live: unknown"}
+                                      </span>
+                                      {k.liveQuota.total > 0 && (
+                                        <div className="h-1.5 w-24 rounded-full bg-zinc-800 overflow-hidden">
+                                          <div
+                                            className={`h-full transition-all duration-500 ${
+                                              k.liveQuota.status === "exceeded" || k.liveQuota.used >= k.liveQuota.total
+                                                ? "bg-red-500"
+                                                : k.liveQuota.used / k.liveQuota.total >= 0.8
+                                                  ? "bg-amber-500"
+                                                  : "bg-cyan-500"
+                                            }`}
+                                            style={{ width: `${Math.min(100, Math.max(0, (k.liveQuota.used / k.liveQuota.total) * 100))}%` }}
+                                          />
+                                        </div>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* ── 60-INTERVAL REAL TELEMETRY HISTORY BAR ── */}
+                        <div className="space-y-1 pt-1 border-t border-white/[0.04]">
+                          <div className="flex items-center justify-between text-[10px] text-zinc-500 font-mono px-0.5">
+                            <span>Real-time Traffic & Latency History (60 Intervals)</span>
+                            <span>{p.history.reduce((acc, b) => acc + b.requests, 0)} total requests in window</span>
+                          </div>
+                          <div className="flex items-center gap-[2.5px] w-full pt-0.5">
+                            {p.history.map((bar, i) => {
+                              let bg = "bg-[#3f3f46]/50";
+                              if (bar.status === "warning") bg = "bg-[#f59e0b]";
+                              else if (bar.status === "success") bg = "bg-[#22c55e]";
+                              else if (bar.status === "error") bg = "bg-[#ef4444]";
+
+                              return (
+                                <div
+                                  key={i}
+                                  className={`flex-1 h-4 rounded-[2px] ${bg} transition-all hover:scale-y-125 hover:brightness-125 cursor-pointer`}
+                                  title={
+                                    bar.requests > 0
+                                      ? `${bar.time}: ${bar.requests} reqs (${bar.latency}ms avg) • ${bar.status.toUpperCase()}`
+                                      : `${bar.time}: No requests (Idle)`
+                                  }
+                                />
+                              );
+                            })}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
             </div>
           )}
 
